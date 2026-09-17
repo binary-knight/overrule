@@ -62,11 +62,17 @@ function renderProviders() {
   });
   updateEstimate(); drawMesh();
 }
+// Document text rides in every prompt, so it multiplies with the number of calls. Rough: four characters to a token.
+function documentNote() {
+  const total = (state.attachments || []).reduce((n, a) => n + (a.chars || 0), 0), chars = Math.min(DOC_PROMPT_CAP, total);
+  if (!chars) return '';
+  return `. Documents add about ${Math.max(1, Math.round(chars / 4000))}k tokens to every call${total > DOC_PROMPT_CAP ? `; members see the first ${DOC_PROMPT_CAP.toLocaleString()} of ${total.toLocaleString()} characters` : ''}`;
+}
 function updateEstimate() {
   const n = state.selected.size, cycles = Number($('rounds').value);
   // Upper bound, matching the server: openings, turns, draft, ballots, one revision with its ballots, one re-ask per member.
   const typical = n + n * cycles + 1 + (n - 1), maximum = typical + 1 + (n - 1) + n;
-  $('call-estimate').textContent = n ? `About ${typical} calls, up to ${maximum}${cycles === 1 && n >= 4 ? `. With ${n} members, one cycle means each speaks once and nobody replies` : ''}` : 'Select your members';
+  $('call-estimate').textContent = n ? `About ${typical} calls, up to ${maximum}${cycles === 1 && n >= 4 ? `. With ${n} members, one cycle means each speaks once and nobody replies` : ''}${documentNote()}` : 'Select your members';
   const blocker = state.providers.find(p => state.selected.has(p.id) && !available(p));
   // A signed-out CLI reading can be stale; the server re-probes before spending anything, so only a missing CLI or key hard-blocks here.
   const hard = blocker && !(state.types[blocker.type]?.cli && readiness(blocker).level === 'attention');
@@ -92,6 +98,54 @@ function archetypeSetup() {
   $('role-archetype').innerHTML = '<option value="">Custom (write your own below)</option>' + ARCHETYPES.map(([name], i) => `<option value="${i}">${escapeHTML(name)}</option>`).join('');
   $('role-archetype').onchange = () => { const pick = ARCHETYPES[Number($('role-archetype').value)]; if (pick) $('provider-role').value = pick[1]; };
   $('provider-role').oninput = () => { const i = ARCHETYPES.findIndex(([, text]) => text === $('provider-role').value); $('role-archetype').value = i >= 0 ? String(i) : ''; };
+}
+// ---------- documents ----------
+// Files dropped on the brief upload straight to the host, which reads their text once. The server's staged list is the truth,
+// so a reload or another paired device shows the same documents.
+const DOC_MAX_BYTES = 25 * 1024 * 1024, DOC_MAX_FILES = 10, DOC_PROMPT_CAP = 60000;
+const bytesText = n => n < 1024 ? `${n} B` : n < 1048576 ? `${Math.round(n / 1024)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+function renderAttachments() {
+  const list = state.attachments || [];
+  $('attach-note').classList.toggle('hidden', !list.length);
+  $('attach-list').innerHTML = list.map((a, i) => `<div class="attach-item${a.warning ? ' has-warning' : ''}"><div class="attach-main"><span class="attach-name">${escapeHTML(a.name)}</span><span class="attach-meta">${bytesText(a.size)}${a.uploading ? ', uploading and reading…' : a.chars ? `, ${a.chars.toLocaleString()} characters read` : ', no text read'}</span>${a.uploading ? '' : `<button type="button" class="attach-remove" data-remove-doc="${i}" aria-label="Remove ${escapeHTML(a.name)}">×</button>`}</div>${a.warning ? `<p class="attach-warning">${escapeHTML(a.warning)}</p>` : ''}</div>`).join('');
+  $('attach-list').querySelectorAll('[data-remove-doc]').forEach(b => b.onclick = async () => {
+    const doc = state.attachments[Number(b.dataset.removeDoc)]; if (!doc) return;
+    try { await api(`/api/attachments/${doc.id}`, 'DELETE'); } catch (error) { return toast(error.message); }
+    state.attachments = state.attachments.filter(a => a !== doc); renderAttachments(); updateEstimate();
+  });
+}
+async function uploadDocument(file, retried = false) {
+  const response = await fetch('/api/attachments', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name), 'X-Mesh-Token': state.token || '' }, body: file });
+  const result = await response.json().catch(() => ({}));
+  if (response.status === 403 && result.code === 'stale-token' && !retried) { const fresh = await fetch('/api/bootstrap'); if (fresh.ok) { state.token = (await fresh.json()).token; return uploadDocument(file, true); } }
+  if (response.status === 401) throw new Error('Pair this device again, then attach the file.');
+  if (!response.ok) throw new Error(result.error || `${file.name} could not be uploaded.`);
+  return result;
+}
+async function attachFiles(files) {
+  state.attachments ||= [];
+  for (const file of [...files]) {
+    if (state.attachments.length >= DOC_MAX_FILES) { toast(`A meeting takes up to ${DOC_MAX_FILES} documents.`); break; }
+    if (file.size > DOC_MAX_BYTES) { toast(`${file.name} is larger than 25 MB.`); continue; }
+    if (!file.size) { toast(`${file.name} is empty, or it is a folder. Zip a folder to attach it.`); continue; }
+    const pending = { name: file.name, size: file.size, uploading: true }; state.attachments.push(pending); renderAttachments(); updateEstimate();
+    try { Object.assign(pending, await uploadDocument(file), { uploading: false }); }
+    catch (error) { state.attachments = state.attachments.filter(a => a !== pending); toast(error.message); }
+    renderAttachments(); updateEstimate();
+  }
+}
+function documentsSetup() {
+  $('attach-button').onclick = () => $('attach-input').click();
+  $('attach-input').onchange = () => { attachFiles($('attach-input').files); $('attach-input').value = ''; };
+  const zone = $('drop-zone'), hasFiles = event => [...(event.dataTransfer?.types || [])].includes('Files'); let depth = 0;
+  zone.addEventListener('dragenter', event => { if (!hasFiles(event)) return; event.preventDefault(); depth++; zone.classList.add('dragging'); });
+  zone.addEventListener('dragover', event => { if (hasFiles(event)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } });
+  zone.addEventListener('dragleave', event => { if (hasFiles(event) && --depth <= 0) { depth = 0; zone.classList.remove('dragging'); } });
+  zone.addEventListener('drop', event => { if (!hasFiles(event)) return; event.preventDefault(); depth = 0; zone.classList.remove('dragging'); attachFiles(event.dataTransfer.files); });
+  // A file dropped beside the brief must not make the browser navigate away from a half-written meeting.
+  for (const type of ['dragover', 'drop']) window.addEventListener(type, event => { if (hasFiles(event) && !zone.contains(event.target)) event.preventDefault(); });
+  // Pasting a file (a screenshot of a table will not work, but a copied document does) attaches it too.
+  $('prompt').addEventListener('paste', event => { const files = [...(event.clipboardData?.files || [])]; if (files.length) { event.preventDefault(); attachFiles(files); } });
 }
 // ---------- workspace ----------
 const levelValue = () => document.querySelector('input[name=workspace-level]:checked')?.value || '';
@@ -247,6 +301,13 @@ function renderRun(run) {
   $('resume').textContent = run.phase === 'draft' && run.stopReason ? 'Retry the draft (1 call)' : `Resume meeting (up to ${remaining} call${remaining === 1 ? '' : 's'})`;
   $('export').href = `/api/runs/${run.id}/export`;
   const ws = run.workspace;
+  const docs = run.attachments || [], docState = run.documents?.state;
+  $('run-documents').classList.toggle('hidden', !docs.length);
+  if (docs.length) {
+    const where = docState === 'removed' ? 'Removed from the host.' : docState === 'text-kept' ? 'The files are removed; their extracted text is kept on the host so this meeting can be resumed.' : 'On the host until the meeting closes.';
+    $('run-documents').innerHTML = `Documents: ${docs.map(a => `${escapeHTML(a.name)} (${a.chars ? a.chars.toLocaleString() + ' characters' : 'no text read'})`).join(', ')}. ${where}${docState === 'text-kept' && run.status !== 'running' ? ' <button type="button" class="text-button" id="remove-documents">Remove the text now</button>' : ''}`;
+    const remove = $('remove-documents'); if (remove) remove.onclick = async () => { try { await api(`/api/runs/${run.id}/documents`, 'DELETE'); watchRun(await api(`/api/runs/${run.id}`)); toast('Removed. This meeting can no longer be resumed.'); } catch (error) { toast(error.message); } };
+  }
   $('run-workspace').classList.toggle('hidden', !ws);
   $('run-workspace').classList.toggle('start-blocker', ws?.level === 'full-access');
   if (ws) $('run-workspace').textContent = [`Workspace ${ws.name}, ${ws.level === 'full-access' ? 'full access' : ws.level}`, ws.attachedFrom && ws.attachedFrom !== 'localhost' ? `attached from ${ws.attachedFrom}` : '', ws.branch ? `branch ${ws.branch}` : '', ws.network ? 'network on' : '', ws.applied ? `applied into ${ws.applied.into} at ${new Date(ws.applied.at).toLocaleTimeString()}` : ws.discarded ? 'branch discarded' : '', ws.measurement ? `blast radius ${ws.measurement.score ?? '?'} of 100` : '', (ws.canary?.detail || '').replace(/\.$/, '')].filter(Boolean).join('. ') + '.';
@@ -294,9 +355,11 @@ async function loadRun(id) {
 }
 async function startRun(demo = false) {
   if (!demo && !$('prompt').value.trim()) { $('prompt').focus(); return toast('Describe what you want your council to work on.'); }
+  if (!demo && (state.attachments || []).some(a => a.uploading)) return toast('Wait for the documents to finish uploading.');
   $('start').disabled = true; $('demo').disabled = true;
   try {
-    const run = await api('/api/runs', 'POST', { prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), demo, workspace: demo ? undefined : workspacePayload() });
+    const run = await api('/api/runs', 'POST', { prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), demo, workspace: demo ? undefined : workspacePayload(), attachmentIds: demo ? undefined : (state.attachments || []).filter(a => a.id).map(a => a.id) });
+    if (!demo && run.attachments?.length) { state.attachments = []; renderAttachments(); }
     showPage('workspace'); watchRun(run); await refreshHistory(); $('discussion').scrollIntoView({ behavior: 'smooth', block: 'start' });
     if (!demo && run.workspace) api('/api/workspace').then(config => { state.workspaceConfig = config; workspaceSetup(); }).catch(() => {}); // the workspace just became a recent
   } catch (error) { toast(error.message); } finally { $('demo').disabled = false; updateEstimate(); }
@@ -474,6 +537,7 @@ $('reuse').onclick = () => { const prompt = currentRun.prompt; newDiscussion(); 
     if (draft.workspacePath) $('workspace-path').value = draft.workspacePath; if (draft.workspaceChecks) $('workspace-checks').value = draft.workspaceChecks;
     try { state.workspaceConfig = await api('/api/workspace'); } catch { state.workspaceConfig = {}; }
     workspaceSetup();
+    documentsSetup(); try { state.attachments = (await api('/api/attachments')).staged; } catch { state.attachments = []; } renderAttachments(); updateEstimate();
     $('char-count').textContent = `${$('prompt').value.length.toLocaleString()} / 24,000`;
     renderHistory(); const active = state.runs.find(r => r.status === 'running'); if (active) await loadRun(active.id);
   }

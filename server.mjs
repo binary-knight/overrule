@@ -10,6 +10,7 @@ import { Mesh, validateRun, exportMarkdown, DEMO_PROMPT, latestCandidate } from 
 import { validateWorkspacePath, browseHost, inspect as inspectWorkspace, codexCanary, measureLevel, agentsecBinary, LEVELS } from './lib/workspace.mjs';
 import { SecurityJobs, listPresets, memberProfiles, validateImage, vendoredAgentsec } from './lib/security.mjs';
 import { Access } from './lib/access.mjs';
+import { Attachments, MAX_FILE_BYTES, MAX_FILES, ACCEPTED } from './lib/attachments.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const defaults = [
@@ -18,11 +19,18 @@ const defaults = [
 ];
 const demoPool = () => [{ ...defaults[0], id: 'demo-builder', name: 'Demo builder' }, { ...defaults[1], id: 'demo-reviewer', name: 'Demo reviewer' }];
 
-export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 'data'), providerCall, detect = detectClis, addresses, workspaceRoot = process.env.MESH_WORKSPACE_ROOT || '', canary = codexCanary, checkRunner, measure = (level, cwd) => measureLevel(level, cwd, { dataDir: directory }), securityJobs } = {}) {
+export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 'data'), providerCall, detect = detectClis, addresses, workspaceRoot = process.env.MESH_WORKSPACE_ROOT || '', canary = codexCanary, checkRunner, measure = (level, cwd) => measureLevel(level, cwd, { dataDir: directory }), securityJobs, documentRunner } = {}) {
   const store = new Store(directory);
   const access = new Access(store, addresses);
   let providers = store.read('providers.json', defaults.map(p => ({ ...p })));
-  const mesh = new Mesh(store, providerCall, { runChecks: checkRunner });
+  const attachments = new Attachments(directory, { run: documentRunner });
+  const mesh = new Mesh(store, providerCall, { runChecks: checkRunner, attachments });
+  // Documents: a meeting that the last shutdown interrupted keeps only its extracted text; folders of finished or forgotten meetings go.
+  const documentsReady = (async () => {
+    const holding = mesh.runs.filter(r => r.attachments?.length && r.documents?.state !== 'removed');
+    for (const run of holding) await mesh.releaseDocuments(run, { keepText: run.status !== 'complete' });
+    await attachments.sweep(holding.filter(r => r.status !== 'complete').map(r => r.id));
+  })().catch(error => console.error(`Document cleanup failed: ${error.message}`));
   const csrf = randomBytes(32).toString('hex');
   let cliStatus = detect(), probedAt = Date.now();
   const refreshClis = () => { probedAt = Date.now(); return (cliStatus = detect()); };
@@ -142,6 +150,16 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
         if (maxScore !== null && (!Number.isInteger(maxScore) || maxScore < 0 || maxScore > 100)) throw new Error('The budget is a whole number from 0 to 100, or blank for none.');
         saveWorkspaceSettings(); return json(res, 200, { maxScore });
       }
+      // ---- Documents for a meeting: raw upload, one file per request, name in a header. Never JSON, never multipart. ----
+      if (req.method === 'GET' && url.pathname === '/api/attachments') { await documentsReady; return json(res, 200, { staged: await attachments.list(), maxFileBytes: MAX_FILE_BYTES, maxFiles: MAX_FILES, accepted: ACCEPTED }); }
+      if (req.method === 'POST' && url.pathname === '/api/attachments') {
+        if (!(req.headers['content-type'] || '').startsWith('application/octet-stream')) throw new Error('Send the file as application/octet-stream.');
+        if (Number(req.headers['content-length']) > MAX_FILE_BYTES) { req.resume(); throw new Error(`A document can be up to ${MAX_FILE_BYTES / 1024 / 1024} MB.`); }
+        let name = ''; try { name = decodeURIComponent(String(req.headers['x-file-name'] || '')); } catch { throw new Error('The file name could not be read.'); }
+        try { return json(res, 201, await attachments.stage(name, req)); } catch (error) { req.resume(); throw error; }
+      }
+      const staged = url.pathname.match(/^\/api\/attachments\/([0-9a-f-]{36})$/);
+      if (req.method === 'DELETE' && staged) { await attachments.remove(staged[1]); return json(res, 200, { ok: true }); }
       if (req.method === 'DELETE' && url.pathname === '/api/workspace/recent') {
         const removed = String((await body(req)).path || '');
         recent = recent.filter(p => p !== removed); saveWorkspaceSettings();
@@ -231,14 +249,22 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
         const options = validateRun(input, pool);
         options.workspace = demo ? null : await parseWorkspace(input.workspace, options, local ? 'localhost' : String(req.socket.remoteAddress || 'lan'));
         if (!demo) await assertReady(options.participants);
+        if (mesh.controllers.size >= 2) throw new Error('Two meetings are already running. Stop or finish one first.');
         if (options.workspace) rememberWorkspace(options.workspace.path);
-        return json(res, 201, mesh.create(options, demo));
+        // Staged documents move under this meeting; if the meeting cannot start they go back to the composer.
+        if (!demo && Array.isArray(input.attachmentIds) && input.attachmentIds.length) { options.id = randomUUID(); options.attachments = await attachments.claim(input.attachmentIds, options.id); }
+        try { return json(res, 201, mesh.create(options, demo)); }
+        catch (error) { if (options.attachments?.length) await attachments.unclaim(options.id, options.attachments); throw error; }
       }
-      const match = url.pathname.match(/^\/api\/runs\/([a-zA-Z0-9-]+)(?:\/(events|cancel|resume|say|export|apply|discard|patch))?$/);
+      const match = url.pathname.match(/^\/api\/runs\/([a-zA-Z0-9-]+)(?:\/(events|cancel|resume|say|export|apply|discard|patch|documents))?$/);
       if (match) {
         const run = mesh.runs.find(r => r.id === match[1]);
         if (!run) return json(res, 404, { error: 'Discussion not found.' });
         if (req.method === 'POST' && match[2] === 'cancel') { mesh.cancel(run.id); return json(res, 200, { ok: true }); }
+        if (req.method === 'DELETE' && match[2] === 'documents') {
+          if (run.status === 'running') throw new Error('Stop the meeting before removing its documents.');
+          await mesh.releaseDocuments(run); return json(res, 200, { documents: run.documents || null });
+        }
         if (req.method === 'POST' && match[2] === 'say') {
           const text = String((await body(req)).text || '').trim();
           if (!text || text.length > 4000) throw new Error('Say something between 1 and 4,000 characters.');
