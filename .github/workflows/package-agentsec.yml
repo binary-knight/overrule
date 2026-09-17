@@ -1,12 +1,11 @@
 name: Package agentsec-pack
 # Pulls the latest agentsec-pack source, checks that it installs and runs, and commits it into vendor/ so the app can install
 # it on a host from this repository alone. Runs daily and on demand.
-# agentsec-pack is a private repository, so the clone needs the AGENTSEC_PACK_TOKEN secret: a fine-grained personal access token
-# with "Contents: read" on binary-knight/agentsec-pack. Add it with:
-#   gh secret set AGENTSEC_PACK_TOKEN -R binary-knight/model-mesh
-# The job's own GITHUB_TOKEN cannot read other repositories, so without the secret the clone fails with that message
-# (unless agentsec-pack is made public, in which case no secret is needed). A vendor commit pushed with GITHUB_TOKEN does not
-# trigger the Tests workflow; that is GitHub's rule for bot pushes and is fine, since vendor/ holds no app code.
+# agentsec-pack is public, so the clone needs no credentials. If it is ever made private again, add a fine-grained personal
+# access token with "Contents: read" on binary-knight/agentsec-pack as the AGENTSEC_PACK_TOKEN secret
+# (gh secret set AGENTSEC_PACK_TOKEN -R binary-knight/model-mesh); the job's own GITHUB_TOKEN cannot read other repositories.
+# A vendor commit pushed with GITHUB_TOKEN does not trigger the Tests workflow; that is GitHub's rule for bot pushes and is
+# fine, since vendor/ holds no app code.
 on:
   schedule:
     - cron: '17 6 * * *'
@@ -17,18 +16,14 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - name: Package the latest source into vendor/
         env:
           AGENTSEC_PACK_TOKEN: ${{ secrets.AGENTSEC_PACK_TOKEN }}
-        run: |
-          if [ -z "$AGENTSEC_PACK_TOKEN" ]; then
-            echo "::warning::The AGENTSEC_PACK_TOKEN secret is not set; the clone only works if agentsec-pack is public. Otherwise add a fine-grained token with Contents: read on binary-knight/agentsec-pack: gh secret set AGENTSEC_PACK_TOKEN -R binary-knight/model-mesh"
-          fi
-          scripts/package-agentsec.sh
+        run: scripts/package-agentsec.sh
       - name: Prove the bundle installs and runs
         run: |
           set -euo pipefail

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Package the latest agentsec-pack source into vendor/ so the app can install it on a host without network access to GitHub.
 # Usage: scripts/package-agentsec.sh [path-to-checkout]
-# Without a path it clones the repository at its default branch. agentsec-pack is a private repository, so the clone needs a
-# token with read access to it: pass one in AGENTSEC_PACK_TOKEN (the workflow supplies the AGENTSEC_PACK_TOKEN secret).
+# Without a path it clones the public repository at its default branch. If that repository is ever private, set
+# AGENTSEC_PACK_TOKEN to a token with read access to it (the workflow passes the AGENTSEC_PACK_TOKEN secret through).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 SRC="${1:-}"
@@ -17,8 +17,8 @@ if [ -z "$SRC" ]; then
     auth=(-c "http.https://github.com/.extraheader=Authorization: basic $(printf 'x-access-token:%s' "$AGENTSEC_PACK_TOKEN" | base64 -w0)")
   fi
   if ! GIT_TERMINAL_PROMPT=0 git "${auth[@]}" clone --quiet --depth 1 https://github.com/binary-knight/agentsec-pack.git "$tmp/agentsec-pack"; then
-    echo "could not clone binary-knight/agentsec-pack. It is a private repository: set AGENTSEC_PACK_TOKEN to a token with read access to it" >&2
-    echo "(a fine-grained personal access token with Contents: read on that repository), or pass a local checkout as the first argument." >&2
+    echo "could not clone binary-knight/agentsec-pack. Check network access to github.com; if the repository is private, set AGENTSEC_PACK_TOKEN" >&2
+    echo "to a token with read access to it (a fine-grained token with Contents: read), or pass a local checkout as the first argument." >&2
     exit 1
   fi
   SRC="$tmp/agentsec-pack"
