@@ -791,7 +791,7 @@ test('a closed meeting can be reconvened: same record, fresh budget, the branch 
   const { server, mesh } = createApp({ directory: store.directory, addresses: [], workspaceRoot: root, canary: okCanary, checkRunner: plainChecks, measure: async () => ({ available: false, detail: 'stub' }),
     detect: async () => ({ codex: { installed: true, signedIn: true }, claude: { installed: true, signedIn: true } }),
     providerCall: async (p, r) => {
-      const phase = phaseOf(r.prompt); seen.push({ name: p.name, phase, cwd: r.cwd, prompt: r.prompt });
+      const phase = phaseOf(r.prompt); seen.push({ name: p.name, phase, cwd: r.cwd, prompt: r.prompt, ownerNotes: Boolean(r.cwd) && existsSync(join(r.cwd, 'OWNER-NOTES.md')) });
       if (phase === 'draft') { const version = Number(r.prompt.match(/leave behind as candidate v(\d+)/)[1]); await writeFile(join(r.cwd, `step-${version}.txt`), `written for v${version}\n`); return { text: draft(`Implemented step ${version}.`) }; }
       if (phase === 'ratify') { const version = Number(r.prompt.match(/BALLOT on candidate v(\d+)/)[1]); return { text: ballot(version < objectUntil ? 'object' : 'approve', version < objectUntil ? [{ claim: 'not yet', condition: 'another pass' }] : []) }; }
       return { text: agreeable(p, r, phase) };
@@ -814,6 +814,8 @@ test('a closed meeting can be reconvened: same record, fresh budget, the branch 
   // Reconvene is refused while running, and for a demo; apply session 1, then reconvene with a new instruction.
   assert.equal((await (await post(`/api/runs/${run.id}/apply`, {})).json()).into, 'main');
   const turnsBefore = run.entries.filter(e => e.phase === 'floor').length;
+  // The owner edits main between sessions; the next session must build on that, not on the stale branch tip.
+  await writeFile(join(project, 'OWNER-NOTES.md'), 'edited between sessions\n'); await git(project, ['add', '-A']); await git(project, ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'owner edit']);
   assert.match((await (await post(`/api/runs/${run.id}/reconvene`, { text: '', cycles: 1 })).json()).error, /what to take up next/);
   const again = await (await post(`/api/runs/${run.id}/reconvene`, { text: 'Now add the third step.', cycles: 1 })).json();
   assert.equal(again.session, 2); assert.equal(again.status, 'running'); assert.equal(again.sessions.length, 1); assert.equal(again.sessions[0].stopReason, 'consensus'); assert.ok(again.sessions[0].applied); assert.equal(again.workspace.applied, null);
@@ -824,6 +826,7 @@ test('a closed meeting can be reconvened: same record, fresh budget, the branch 
   assert.ok(seen.some(s => /OWNER reconvened the meeting \(session 2\)/.test(s.prompt) && /Now add the third step/.test(s.prompt)));
   // Session 2's candidate is the delta from what was applied, and applying it lands only the new file.
   const candidate2 = latestCandidateOf(run); assert.deepEqual(candidate2.files.map(f => f.path || f), ['step-3.txt']); assert.notEqual(candidate2.hash, candidate1.hash);
+  assert.equal(seen.filter(s => s.phase === 'draft').at(-1).ownerNotes, true, 'the implementer saw the owner’s edit');
   assert.equal((await (await post(`/api/runs/${run.id}/apply`, {})).json()).into, 'main');
   for (const f of ['step-1.txt', 'step-2.txt', 'step-3.txt']) assert.ok(existsSync(join(project, f)), f);
   assert.match(exportMarkdown(run), /## Final answer \(session 2\)/); assert.match(exportMarkdown(run), /## Session 1 result/);
