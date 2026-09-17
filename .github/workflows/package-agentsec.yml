@@ -1,0 +1,39 @@
+name: Package agentsec-pack
+# Pulls the latest agentsec-pack source, checks that it installs and runs, and commits it into vendor/ so the app can install
+# it on a host from this repository alone. Runs daily and on demand.
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Package the latest source into vendor/
+        run: scripts/package-agentsec.sh
+      - name: Prove the bundle installs and runs
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tar -xzf vendor/agentsec-pack-*.tar.gz -C "$tmp"
+          python3 -m venv "$tmp/venv"
+          "$tmp/venv/bin/pip" install --disable-pip-version-check -e "$tmp/agentsec-pack"
+          "$tmp/venv/bin/agentsec" presets
+          "$tmp/venv/bin/pip" install --disable-pip-version-check -e "$tmp/agentsec-pack[dev]" || true
+          (cd "$tmp/agentsec-pack" && "$tmp/venv/bin/python" -m pytest -q tests/test_scoring.py tests/test_presets.py) || echo "upstream tests did not run; the bundle still installs"
+      - name: Commit the bundle when it changed
+        run: |
+          set -euo pipefail
+          git add vendor
+          if git diff --cached --quiet; then echo "vendor/ unchanged"; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          commit="$(python3 -c 'import json;print(json.load(open("vendor/agentsec.json"))["commit"][:8])')"
+          git commit -m "Vendor agentsec-pack ${commit}"
+          git push

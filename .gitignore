@@ -1,0 +1,18 @@
+data/
+node_modules/
+*.log
+.env
+artifacts/
+# Editor, shell, and tooling files that live in this directory but are not part of the project
+.claude/
+.idea
+.vscode
+.mcp.json
+.bash_profile
+.bashrc
+.profile
+.zprofile
+.zshrc
+.gitconfig
+.gitmodules
+.ripgreprc

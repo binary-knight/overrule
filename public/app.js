@@ -1,0 +1,497 @@
+const $ = id => document.getElementById(id);
+const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let state = { providers: [], selected: new Set(), runs: [], clis: {}, types: {} }, currentRun, events, editingId, toastTimer;
+const glyphs = { 'codex-cli': 'O', 'claude-cli': '✳', openai: 'O', anthropic: '✳', gemini: '✧', grok: '𝕏', huggingface: '⌂', compatible: '◇' };
+const colors = { 'codex-cli': 'mint', 'claude-cli': 'peach', openai: 'mint', anthropic: 'peach', gemini: 'blue', grok: 'gray', huggingface: 'lavender', compatible: 'lavender' };
+function toast(message) { $('toast').textContent = message; $('toast').classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').classList.add('hidden'), 6000); }
+// The draft lives in this browser only, so an expired pairing or a server restart never costs a half-written brief.
+const DRAFT_KEY = 'mesh-draft';
+function saveDraft() { try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ prompt: $('prompt').value, rounds: $('rounds').value, synthesizer: $('synthesizer').value, selected: [...state.selected], maxTokens: $('max-tokens').value, timeout: $('timeout').value, workspacePath: $('workspace-path').value, workspaceChecks: $('workspace-checks').value })); } catch {} }
+function readDraft() { try { return JSON.parse(localStorage.getItem(DRAFT_KEY)) || {}; } catch { return {}; } }
+async function api(path, method = 'GET', data, retried = false) {
+  const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', 'X-Mesh-Token': state.token || '' }, ...(data !== undefined ? { body: JSON.stringify(data) } : {}) });
+  if (response.status === 401) { if ($('prompt').value.trim()) saveDraft(); location.assign('/'); throw new Error('Pair this device again to continue.'); }
+  const result = await response.json().catch(() => ({}));
+  if (response.status === 403 && result.code === 'stale-token' && !retried) {
+    // The server restarted and issued a new mutation token: pick it up and retry once instead of failing every save.
+    const fresh = await fetch('/api/bootstrap');
+    if (fresh.ok) { state.token = (await fresh.json()).token; return api(path, method, data, true); }
+  }
+  if (!response.ok) throw new Error(result.error || 'Request failed.'); return result;
+}
+function cliKey(type) { return type === 'codex-cli' ? 'codex' : 'claude'; }
+function readiness(p) {
+  if (state.types[p.type]?.cli) {
+    const cli = state.clis[cliKey(p.type)] || {};
+    if (!cli.installed) return { level: 'missing', text: 'CLI not found on the server' };
+    if (cli.signedIn === true) return { level: 'ready', text: 'Signed in, ready' };
+    if (cli.signedIn === false) return { level: 'attention', text: `Not signed in. Run ${cliKey(p.type) === 'codex' ? 'codex login' : 'claude auth login'}` };
+    return { level: 'unknown', text: 'CLI installed, sign-in not checked' };
+  }
+  if (p.hasKey) return { level: 'ready', text: 'Saved API key' };
+  if (p.environmentKey) return { level: 'ready', text: 'Environment API key' };
+  if (p.type === 'compatible') return { level: 'ready', text: 'Custom endpoint' };
+  return { level: 'attention', text: 'API key needed' };
+}
+function available(p) { return !['attention', 'missing'].includes(readiness(p).level); }
+function status(p) { return readiness(p).text; }
+function badge(p) { return `<span class="provider-icon ${colors[p.type]}">${glyphs[p.type]}</span>`; }
+function showPage(page) {
+  for (const name of ['workspace', 'connections', 'security']) { $(name).classList.toggle('hidden', page !== name); $(`${name}-nav`).classList.toggle('active', page === name); }
+  $('page-crumb').textContent = page === 'connections' ? 'Connections' : page === 'security' ? 'Security' : currentRun ? 'Discussion' : 'New discussion';
+  if (page === 'security') loadSecurity().catch(error => toast(error.message));
+}
+function renderProviders() {
+  state.selected = new Set([...state.selected].filter(id => state.providers.some(p => p.id === id)));
+  $('connection-count').textContent = state.providers.length;
+  $('participants').innerHTML = state.providers.length ? state.providers.map(p => `<label class="participant ${state.selected.has(p.id) ? 'selected' : ''}" title="${escapeHTML(status(p))}"><input type="checkbox" value="${escapeHTML(p.id)}" ${state.selected.has(p.id) ? 'checked' : ''}>${badge(p)}<span class="participant-info"><strong><i class="state-dot ${readiness(p).level}"></i>${escapeHTML(p.name)}</strong><small>${escapeHTML(p.model || 'CLI default model')}</small></span><span class="provider-status ${available(p) ? 'ready' : ''}">${state.types[p.type]?.cli ? 'Local' : 'API'}</span></label>`).join('') : '<p class="empty-copy">Add two connections to assemble your council.</p>';
+  $('participants').querySelectorAll('input').forEach(input => input.addEventListener('change', () => {
+    if (input.checked && state.selected.size >= 6) { input.checked = false; return toast('Choose up to six participants.'); }
+    input.checked ? state.selected.add(input.value) : state.selected.delete(input.value); renderProviders(); saveDraft();
+  }));
+  const previousEditor = $('synthesizer').value;
+  $('synthesizer').innerHTML = state.providers.filter(p => state.selected.has(p.id)).map(p => `<option value="${escapeHTML(p.id)}">${escapeHTML(p.name)}</option>`).join('');
+  if (state.selected.has(previousEditor)) $('synthesizer').value = previousEditor;
+  $('connection-cards').innerHTML = state.providers.map(p => `<article class="card connection-card"><div class="connection-title">${badge(p)}<div><h2>${escapeHTML(p.name)}</h2><span>${escapeHTML(state.types[p.type].label)}</span></div></div><p class="model-name">${escapeHTML(p.model || 'CLI default model')}</p><p>${escapeHTML(p.role)}</p><div class="connection-bottom"><span class="connection-state"><i class="${readiness(p).level}"></i>${escapeHTML(status(p))}</span><span>${state.types[p.type]?.cli ? `<button class="text-button" data-check="${cliKey(p.type)}">Check sign-in</button>` : ''}<button class="text-button" data-duplicate="${escapeHTML(p.id)}">Add another model</button><button class="text-button" data-edit="${escapeHTML(p.id)}">Edit</button></span></div></article>`).join('');
+  $('connection-cards').querySelectorAll('[data-duplicate]').forEach(button => button.onclick = () => openProvider(null, button.dataset.duplicate));
+  $('connection-cards').querySelectorAll('[data-edit]').forEach(button => button.onclick = () => openProvider(button.dataset.edit));
+  $('connection-cards').querySelectorAll('[data-check]').forEach(button => button.onclick = async () => {
+    button.disabled = true; button.textContent = 'Checking…';
+    try { state.clis = await api('/api/clis/check', 'POST'); renderProviders(); toast(`${button.dataset.check === 'codex' ? 'Codex' : 'Claude Code'}: ${state.clis[button.dataset.check]?.detail || 'checked.'}`); }
+    catch (error) { toast(error.message); button.disabled = false; button.textContent = 'Check sign-in'; }
+  });
+  updateEstimate(); drawMesh();
+}
+function updateEstimate() {
+  const n = state.selected.size, cycles = Number($('rounds').value);
+  // Upper bound, matching the server: openings, turns, draft, ballots, one revision with its ballots, one re-ask per member.
+  const typical = n + n * cycles + 1 + (n - 1), maximum = typical + 1 + (n - 1) + n;
+  $('call-estimate').textContent = n ? `About ${typical} calls, up to ${maximum}${cycles === 1 && n >= 4 ? `. With ${n} members, one cycle means each speaks once and nobody replies` : ''}` : 'Select your members';
+  const blocker = state.providers.find(p => state.selected.has(p.id) && !available(p));
+  // A signed-out CLI reading can be stale; the server re-probes before spending anything, so only a missing CLI or key hard-blocks here.
+  const hard = blocker && !(state.types[blocker.type]?.cli && readiness(blocker).level === 'attention');
+  const level = typeof levelValue === 'function' ? levelValue() : '';
+  $('start-note').textContent = blocker ? `${blocker.name}: ${status(blocker)}. ${hard ? 'Fix this in Connections before starting.' : 'The server will re-check when you start.'}` : level === 'full-access' ? 'FULL ACCESS: every member with tools can do anything your account can do on this machine.' : level === 'workspace-write' ? 'Members read the workspace; the drafter implements on a new branch in its own checkout. Your tree changes only when you apply.' : level === 'read-only' ? 'Members read the workspace inside their sandboxes. Its contents reach every selected provider.' : 'Turns run one at a time. Your brief and every contribution go to every selected provider.';
+  $('start-note').classList.toggle('start-blocker', Boolean(blocker) || level === 'full-access');
+  $('start').disabled = state.selected.size < 2 || Boolean(hard) || (currentRun?.status === 'running');
+}
+// Ten standing perspectives a member can take in the room. Each is a starting point; the field stays editable.
+const ARCHETYPES = [
+  ['Builder', 'Builder: propose concrete, practical solutions first, then defend them. Prefer the smallest thing that works and name what it would take to ship it.'],
+  ['Skeptic', 'Skeptic: assume nothing is established until it is shown. Challenge assumptions, ask for evidence, and refuse to agree on politeness.'],
+  ['Security reviewer', 'Security reviewer: look for what an attacker, a mistake, or bad input could do. Name threats, trust boundaries, and the cheapest mitigation for each.'],
+  ['Architect', 'Architect: think in structures and boundaries. Weigh how a choice ages: coupling, migration cost, failure modes, and what becomes hard to change later.'],
+  ['User advocate', 'User advocate: speak for the person who has to use the result. Push for clarity, fewer steps, and honest defaults; object to anything that serves the builder over the user.'],
+  ['Quant', 'Quant: turn claims into numbers. Ask for the model, the inputs, and the sensitivity; distinguish measured results from estimates and say how wrong each could be.'],
+  ['Pragmatist', 'Pragmatist: optimize for what can actually be done with the time, people, and tools at hand. Cut scope before cutting quality, and say what to defer.'],
+  ['Devil’s advocate', 'Devil’s advocate: argue the strongest case against whatever the room is converging on, even if you privately agree, so the decision survives contact with its best objection.'],
+  ['Domain expert', 'Domain expert: bring the field’s established practice and its known failure patterns. Cite the rule or precedent you rely on and say where the field itself is unsettled.'],
+  ['Editor', 'Editor: care about the deliverable as a document. Push for precise claims, plain words, a clear structure, and nothing the reader cannot act on.'],
+];
+function archetypeSetup() {
+  $('role-archetype').innerHTML = '<option value="">Custom (write your own below)</option>' + ARCHETYPES.map(([name], i) => `<option value="${i}">${escapeHTML(name)}</option>`).join('');
+  $('role-archetype').onchange = () => { const pick = ARCHETYPES[Number($('role-archetype').value)]; if (pick) $('provider-role').value = pick[1]; };
+  $('provider-role').oninput = () => { const i = ARCHETYPES.findIndex(([, text]) => text === $('provider-role').value); $('role-archetype').value = i >= 0 ? String(i) : ''; };
+}
+// ---------- workspace ----------
+const levelValue = () => document.querySelector('input[name=workspace-level]:checked')?.value || '';
+function workspaceSetup() {
+  const config = state.workspaceConfig || {}, roots = config.roots || [];
+  $('workspace-lan').classList.toggle('hidden', Boolean(config.local));
+  $('workspace-budget').value = config.maxScore ?? ''; $('workspace-budget').placeholder = config.agentsec ? 'No budget' : 'Needs agentsec-pack'; $('workspace-budget').disabled = !config.agentsec; $('budget-save').disabled = !config.agentsec;
+  $('agentsec-help').classList.toggle('hidden', config.agentsec !== false);
+  $('roots-empty').classList.toggle('hidden', roots.length > 0);
+  $('roots').innerHTML = roots.map(r => `<span class="root-chip"><button type="button" class="root-open" data-root="${escapeHTML(r)}" title="Browse">${escapeHTML(r)}</button><button type="button" class="root-remove" data-remove="${escapeHTML(r)}" aria-label="Stop allowing ${escapeHTML(r)}">×</button></span>`).join('');
+  $('roots').querySelectorAll('[data-root]').forEach(b => b.onclick = () => browseTo(b.dataset.root));
+  $('roots').querySelectorAll('[data-remove]').forEach(b => b.onclick = async () => { try { state.workspaceConfig = { ...config, ...(await api('/api/workspace/roots', 'DELETE', { path: b.dataset.remove })) }; workspaceSetup(); } catch (error) { toast(error.message); } });
+  workspaceLevelChanged();
+}
+// Host browser for choosing a directory to allow. Folders that cannot be allowed still show, greyed, so the tree stays navigable.
+async function browseHostTo(path) {
+  try {
+    const listing = await api('/api/workspace/browse-host', 'POST', { path });
+    $('root-browser').classList.remove('hidden');
+    $('root-crumb').innerHTML = `${listing.parent ? '<button type="button" class="text-button" id="root-up">Up</button>' : ''}<span>${escapeHTML(listing.path)}</span>${listing.git ? '<span class="chip vote-approve">git</span>' : ''}${listing.selectable ? '<button type="button" class="text-button" id="root-use">Allow this folder</button>' : '<span class="chip">cannot be allowed</span>'}`;
+    if (listing.parent) $('root-up').onclick = () => browseHostTo(listing.parent);
+    if (listing.selectable) $('root-use').onclick = () => { $('root-path').value = listing.path; $('root-add').click(); $('root-browser').classList.add('hidden'); };
+    $('root-entries').innerHTML = listing.entries.length ? listing.entries.map(e => `<button type="button" class="browser-entry ${e.selectable ? '' : 'unselectable'}" data-host-path="${escapeHTML(e.path)}"><span>📁 ${escapeHTML(e.name)}</span>${e.git ? '<span class="chip vote-approve">git</span>' : e.selectable ? '' : '<span>not allowed</span>'}</button>`).join('') : '<p class="empty-copy">No subfolders.</p>';
+    $('root-entries').querySelectorAll('[data-host-path]').forEach(b => b.onclick = () => browseHostTo(b.dataset.hostPath));
+    $('root-path').value = listing.path;
+  } catch (error) { toast(error.message); }
+}
+// Folder browser over the allowed directories, so a workspace can be picked from another machine without knowing the host's paths.
+async function browseTo(path) {
+  try {
+    const listing = await api('/api/workspace/browse', 'POST', { path });
+    $('browser').classList.remove('hidden');
+    $('browser-crumb').innerHTML = `<span>${escapeHTML(listing.path)}</span>${listing.git ? '<span class="chip vote-approve">git</span>' : ''}<button type="button" class="text-button" id="browser-use">Use this folder</button>`;
+    $('browser-use').onclick = () => { $('workspace-path').value = listing.path; saveDraft(); $('workspace-inspect').click(); };
+    $('browser-entries').innerHTML = listing.entries.length ? listing.entries.map(e => `<button type="button" class="browser-entry" data-path="${escapeHTML(e.path)}"><span>📁 ${escapeHTML(e.name)}</span>${e.git ? '<span class="chip vote-approve">git</span>' : ''}</button>`).join('') : '<p class="empty-copy">No subfolders.</p>';
+    $('browser-entries').querySelectorAll('[data-path]').forEach(b => b.onclick = () => browseTo(b.dataset.path));
+    $('workspace-path').value = listing.path; saveDraft();
+  } catch (error) { toast(error.message); }
+}
+function workspaceLevelChanged() {
+  const level = levelValue(), info = state.workspaceInfo;
+  const levelNames = { 'read-only': 'Read-only tools', 'workspace-write': 'Workspace-write', 'full-access': 'Full access' };
+  $('workspace-state').textContent = level ? `${levelNames[level]}${info ? ': ' + info.name : ''}` : '';
+  $('workspace-write-options').classList.toggle('hidden', level !== 'workspace-write' && level !== 'full-access');
+  $('workspace-network').disabled = level === 'full-access'; if (level === 'full-access') $('workspace-network').checked = true;
+  $('workspace-full-ack').classList.toggle('hidden', level !== 'full-access');
+  const needSecrets = Boolean(level && info?.secrets?.length), needDirty = level !== '' && level !== 'read-only' && Boolean(info?.dirty);
+  $('workspace-acks').classList.toggle('hidden', !(needSecrets || needDirty));
+  $('ack-secrets-label').classList.toggle('hidden', !needSecrets); $('ack-dirty-label').classList.toggle('hidden', !needDirty);
+  updateEstimate();
+}
+function renderWorkspaceInfo(info) {
+  state.workspaceInfo = info;
+  const lines = [];
+  lines.push(info.git ? `<span class="ok">Git repository</span> on branch <b>${escapeHTML(info.branch)}</b> at ${escapeHTML((info.head || '').slice(0, 10))}${info.dirty ? `, <span class="warn">${info.dirtyFiles.length} uncommitted change${info.dirtyFiles.length === 1 ? '' : 's'}</span>` : ', clean'}` : `<span class="warn">Not a git repository root</span>, so read-only only`);
+  if (info.secrets?.length) lines.push(`<span class="warn">Looks like secrets:</span> ${info.secrets.slice(0, 6).map(escapeHTML).join(', ')}${info.secrets.length > 6 ? ', …' : ''}`);
+  for (const [level, c] of Object.entries(info.canaries || {})) {
+    lines.push(`<span class="${c.ok ? 'ok' : 'bad'}">${escapeHTML(level)}:</span> ${escapeHTML(c.detail)}`);
+    const m = info.measurements?.[level];
+    if (m?.available) {
+      const over = info.maxScore !== null && info.maxScore !== undefined && m.score !== null && m.score > info.maxScore;
+      lines.push(`&nbsp;&nbsp;<span class="${over ? 'bad' : m.score > 50 ? 'warn' : 'ok'}">Blast radius ${m.score ?? '?'} of 100</span>${over ? ', over your budget, refused' : ''}${m.findings.length ? '. Findings: ' + m.findings.map(f => `${escapeHTML(f.severity)} ${escapeHTML(f.id)} ${escapeHTML(f.title)}`).join('; ') : ''}`);
+      const readable = m.secrets.filter(s => s.readable);
+      if (readable.length) lines.push(`&nbsp;&nbsp;<span class="warn">readable from inside:</span> ${readable.map(s => escapeHTML(s.path)).join(', ')}`);
+      else if (m.secrets.length) lines.push(`&nbsp;&nbsp;<span class="ok">no probed secret path readable</span>`);
+    } else if (m) lines.push(`&nbsp;&nbsp;<span class="warn">${escapeHTML(m.detail)}</span>`);
+  }
+  $('workspace-info').innerHTML = lines.join('<br>'); $('workspace-info').classList.remove('hidden');
+  document.querySelectorAll('input[name=workspace-level]').forEach(input => {
+    const allowed = !input.value || Boolean(info.canaries?.[input.value]?.ok);
+    input.disabled = !allowed; input.closest('.level').classList.toggle('disabled', !allowed);
+    if (!allowed && input.checked) document.querySelector('input[name=workspace-level][value=""]').checked = true;
+  });
+  workspaceLevelChanged();
+}
+function workspacePayload() {
+  const level = levelValue(); if (!level) return undefined;
+  return { path: $('workspace-path').value.trim(), level, checks: $('workspace-checks').value.split('\n').map(l => l.trim()).filter(Boolean), network: $('workspace-network').checked, implementTimeout: Number($('workspace-timeout').value), acknowledgeSecrets: $('ack-secrets').checked, acknowledgeDirty: $('ack-dirty').checked, acknowledgeFullAccess: $('ack-full').checked, claudeSandbox: $('workspace-claude-sandbox').checked, skipMeasurement: $('workspace-skip-measure').checked };
+}
+function drawMesh() {
+  const providers = state.providers.filter(p => state.selected.has(p.id));
+  const n = providers.length;
+  const nodes = providers.map((p, i) => ({ p, x: 170 + Math.cos(-Math.PI / 2 + i * 2 * Math.PI / n) * 98, y: 119 + Math.sin(-Math.PI / 2 + i * 2 * Math.PI / n) * 77 }));
+  let svg = '<defs><pattern id="dots" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r=".7"/></pattern></defs><rect width="340" height="256" fill="url(#dots)"/><circle class="orbit" cx="170" cy="119" r="77"/>';
+  for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) svg += `<line class="mesh-edge" x1="${nodes[i].x}" y1="${nodes[i].y}" x2="${nodes[j].x}" y2="${nodes[j].y}"/>`;
+  for (const node of nodes) svg += `<line class="mesh-spoke" x1="170" y1="119" x2="${node.x}" y2="${node.y}"/>`;
+  svg += '<rect class="mesh-center" x="146" y="95" width="48" height="48" rx="15"/><text x="170" y="126" class="center-glyph">◈</text>';
+  for (const { p, x, y } of nodes) svg += `<g class="mesh-node ${colors[p.type]}"><circle cx="${x}" cy="${y}" r="24"/><text x="${x}" y="${y + 6}">${escapeHTML(glyphs[p.type])}</text><text class="mesh-node-label" x="${x}" y="${y + 41}">${escapeHTML(p.name.slice(0, 15))}</text></g>`;
+  if (!n) svg += '<text x="170" y="221" class="mesh-node-label">Select your participants</text>';
+  $('mesh-diagram').innerHTML = svg;
+}
+function renderHistory() {
+  $('history').innerHTML = state.runs.length ? state.runs.map(run => `<button class="history-item ${currentRun?.id === run.id ? 'current' : ''}" data-run="${run.id}"><span class="history-dot ${run.status}"></span><span>${escapeHTML(run.demo ? 'Scripted demo' : run.prompt)}<small>${new Date(run.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}, ${escapeHTML(run.status)}</small></span></button>`).join('') : '<p class="history-empty">A new perspective<br>starts with a question.</p>';
+  $('history').querySelectorAll('[data-run]').forEach(button => button.onclick = () => loadRun(button.dataset.run));
+}
+async function refreshHistory() { state.runs = await api('/api/runs'); renderHistory(); }
+function markdown(text) {
+  // Render a deliberately small Markdown subset; provider HTML is always escaped.
+  return text.split(/(```[\s\S]*?```)/g).map(part => {
+    if (part.startsWith('```')) return `<pre><code>${escapeHTML(part.replace(/^```[^\n]*\n?/, '').replace(/```$/, ''))}</code></pre>`;
+    return escapeHTML(part).split('\n').map(line => {
+      let formatted = line.replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      const heading = formatted.match(/^(#{1,4}) (.*)$/);
+      if (heading) return `<h${Math.min(heading[1].length + 1, 5)}>${heading[2]}</h${Math.min(heading[1].length + 1, 5)}>`;
+      if (/^[-*] /.test(formatted)) return `<p class="md-list">• ${formatted.slice(2)}</p>`;
+      return formatted ? `<p>${formatted}</p>` : '';
+    }).join('');
+  }).join('');
+}
+function selectTab(tab) {
+  $('answer').classList.toggle('hidden', tab !== 'answer'); $('transcript').classList.toggle('hidden', tab !== 'transcript');
+  $('issues').classList.toggle('hidden', tab !== 'transcript' || !currentRun?.issues?.length);
+  document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+}
+const isMeeting = run => run.kind === 'meeting';
+const who = (run, id) => id === 'owner' ? 'You' : run.participants.find(p => p.id === id)?.name || id || 'the group';
+const elapsed = e => e.startedAt ? `${Math.max(0, Math.round((new Date(e.finishedAt || Date.now()) - new Date(e.startedAt)) / 1000))}s` : '';
+function entryTag(run, e) {
+  if (e.phase === 'opening') return 'Opening position';
+  if (e.phase === 'floor') return e.speaker === 'owner' ? 'You' : `Floor, cycle ${e.cycle}`;
+  if (e.phase === 'draft') return `Candidate v${e.candidateVersion}`;
+  if (e.phase === 'ratify') return `Ballot on v${e.candidateVersion}`;
+  return e.phase === 'propose' ? 'Independent proposal' : e.phase === 'review' ? `Review, round ${e.round}` : 'Final synthesis';
+}
+function renderEntry(run, e) {
+  const f = e.fields || {}, icon = e.status === 'complete' ? '✓' : e.status === 'running' ? '◌' : '!';
+  const chips = [];
+  if (e.phase === 'floor' && e.speaker !== 'owner' && f.stance) chips.push(`<span class="chip stance-${f.stance}">${f.stance}</span>`);
+  if (e.phase === 'ratify' && f.vote) chips.push(`<span class="chip vote-${f.vote}">${f.vote}</span>`);
+  if (e.superseded) chips.push('<span class="chip">re-asked</span>');
+  if (e.attempt > 1) chips.push(`<span class="chip">attempt ${e.attempt}</span>`);
+  if (e.workspace) chips.push(`<span class="chip">${escapeHTML(e.workspace.level)} in ${escapeHTML(e.workspace.checkout)}</span>`);
+  if (f.opinion) chips.push('<span class="chip opinion">opinion, no checks</span>');
+  const meta = [];
+  if (f.concedes?.length) meta.push(`Concedes ${f.concedes.map(c => `<b>${escapeHTML(c.entry)}</b> “${escapeHTML(c.quote)}”`).join('; ')}`);
+  for (const o of f.objections || []) meta.push(`Objects${o.against ? ` to ${escapeHTML(who(run, o.against))}` : ''}: “${escapeHTML(o.claim)}”${o.condition ? ` — resolves when ${escapeHTML(o.condition)}` : ''}`);
+  if (f.resolves?.length) meta.push(`Resolves ${f.resolves.map(escapeHTML).join(', ')}`);
+  if (f.settle) meta.push(`Would be settled by: ${escapeHTML(f.settle)}`);
+  if (f.needs?.what) meta.push(`Needs ${escapeHTML(f.needs.what)}${f.needs.from ? ` from ${escapeHTML(who(run, f.needs.from))}` : ''}`);
+  if (f.nominates) meta.push(`Nominates ${escapeHTML(who(run, f.nominates))}`);
+  if (f.openPoints?.length) meta.push(`Open: ${f.openPoints.map(escapeHTML).join('; ')}`);
+  if (f.unresolved?.length) meta.push(`Left unresolved: ${f.unresolved.map(escapeHTML).join(', ')}`);
+  if (f.reason && e.phase === 'ratify') meta.push(escapeHTML(f.reason));
+  if (e.note) meta.push(escapeHTML(e.note));
+  let extras = '';
+  if (e.candidate) {
+    const c = e.candidate;
+    extras += `<div class="candidate"><div><b>Candidate commit ${escapeHTML(c.hash.slice(0, 12))}</b> on ${escapeHTML(c.branch)}${c.changed ? '' : ' <span class="warn">(no file changes)</span>'}${c.artifact ? `. <a href="/api/runs/${run.id}/patch">Download patch</a>` : ''}</div>${c.files.length ? `<ul class="files">${c.files.map(fi => `<li><code>${escapeHTML(fi.status)}</code> ${escapeHTML(fi.path)}</li>`).join('')}</ul>` : ''}${c.patch ? `<details><summary>Patch (${c.bytes.toLocaleString()} bytes)</summary><pre>${escapeHTML(c.patch)}</pre></details>` : ''}${c.checks.length ? c.checks.map(k => `<details${k.code === 0 ? '' : ' open'}><summary>$ ${escapeHTML(k.command)} → ${k.code === 0 ? 'passed' : k.code === null ? 'could not run' : `exit ${k.code}`} (${k.seconds}s)</summary><pre>${escapeHTML(k.output)}</pre></details>`).join('') : '<div class="warn">No checks configured; ballots on this candidate are opinions.</div>'}</div>`;
+  }
+  if (e.actions?.length) extras += `<details class="activity"><summary>Activity: ${e.actions.length} tool event${e.actions.length === 1 ? '' : 's'}</summary><ul>${e.actions.map(a => `<li><code>${escapeHTML(a.type)}</code> ${a.command ? escapeHTML(a.command) : ''}${a.exitCode !== undefined && a.exitCode !== null ? ` → exit ${a.exitCode}` : ''}${a.paths?.length ? `, ${a.paths.map(escapeHTML).join(', ')}` : ''}</li>`).join('')}</ul></details>`;
+  return `<article class="card msg ${e.speaker === 'owner' ? 'owner' : ''} ${e.status} ${e.superseded ? 'superseded' : ''}" data-entry="${e.id}"><header><span class="entry-status ${e.status}">${icon}</span><strong>${escapeHTML(who(run, e.speaker))}</strong><span>${entryTag(run, e)}${e.addressedOwner ? ', answering you' : ''}</span>${chips.join('')}<small>${escapeHTML(e.id)}, ${e.status === 'running' ? 'speaking' : e.status}, ${elapsed(e)}</small></header><div class="msg-body">${e.text ? markdown(e.text) : `<p>${escapeHTML(e.error || 'Speaking…')}</p>`}${meta.map(m => `<p class="entry-meta">${m}</p>`).join('')}${extras}</div></article>`;
+}
+function renderRun(run) {
+  currentRun = run;
+  $('discussion').classList.remove('hidden'); $('workspace').classList.add('run-view'); $('page-crumb').textContent = 'Discussion';
+  const meeting = isMeeting(run);
+  $('run-label').textContent = run.demo ? 'Scripted demo. No model calls.' : '';
+  const titles = { opening: 'Members are writing their positions.', floor: 'The council has the floor.', draft: 'The drafter is writing the candidate.', ratify: 'Members are voting on the candidate.', propose: 'Independent ideas are taking shape.', review: 'The council is comparing notes.', synthesize: 'Bringing the best ideas together.' };
+  const closed = { consensus: 'The council reached consensus.', budget: 'The meeting closed on budget.', stalled: 'The meeting stalled; a candidate was drafted.' };
+  $('run-title').textContent = (run.status === 'complete' ? (closed[run.stopReason] || 'The discussion is complete.') : run.status === 'running' ? (titles[run.phase] || 'The council is thinking.') : `${meeting ? 'Meeting' : 'Discussion'} ${run.status}.`);
+  $('run-prompt').textContent = run.prompt;
+  $('cancel').classList.toggle('hidden', run.status !== 'running'); $('cancel').disabled = false;
+  const remaining = Math.max(1, run.plannedCalls - run.entries.filter(e => e.status === 'complete').length);
+  $('resume').classList.toggle('hidden', !meeting || !['failed', 'interrupted', 'cancelled'].includes(run.status)); $('resume').disabled = false;
+  $('resume').textContent = run.phase === 'draft' && run.stopReason ? 'Retry the draft (1 call)' : `Resume meeting (up to ${remaining} call${remaining === 1 ? '' : 's'})`;
+  $('export').href = `/api/runs/${run.id}/export`;
+  const ws = run.workspace;
+  $('run-workspace').classList.toggle('hidden', !ws);
+  $('run-workspace').classList.toggle('start-blocker', ws?.level === 'full-access');
+  if (ws) $('run-workspace').textContent = [`Workspace ${ws.name}, ${ws.level === 'full-access' ? 'full access' : ws.level}`, ws.attachedFrom && ws.attachedFrom !== 'localhost' ? `attached from ${ws.attachedFrom}` : '', ws.branch ? `branch ${ws.branch}` : '', ws.network ? 'network on' : '', ws.applied ? `applied into ${ws.applied.into} at ${new Date(ws.applied.at).toLocaleTimeString()}` : ws.discarded ? 'branch discarded' : '', ws.measurement ? `blast radius ${ws.measurement.score ?? '?'} of 100` : '', (ws.canary?.detail || '').replace(/\.$/, '')].filter(Boolean).join('. ') + '.';
+  const candidate = ws && [...run.entries].reverse().find(e => e.phase === 'draft' && e.status === 'complete' && e.candidate)?.candidate;
+  const canAct = Boolean(candidate) && run.status !== 'running' && !ws.applied && !ws.discarded;
+  $('apply').classList.toggle('hidden', !canAct); $('discard').classList.toggle('hidden', !canAct); $('apply').disabled = $('discard').disabled = false;
+  if (canAct) $('apply').textContent = `Apply ${candidate.hash.slice(0, 8)} to ${ws.name}`;
+  $('run-error').classList.toggle('hidden', !run.error); $('run-error').textContent = run.error || '';
+  const steps = meeting ? [['opening', 'Opening'], ['floor', run.phase === 'floor' ? `Floor, cycle ${Math.min(run.cycles, 1 + Math.floor(run.entries.filter(e => e.phase === 'floor' && e.speaker !== 'owner' && e.status === 'complete' && !e.superseded).length / Math.max(1, run.participants.length - (run.dropped?.length || 0))))} of ${run.cycles}` : `Floor, ${run.cycles} cycle${run.cycles !== 1 ? 's' : ''}`], ['draft', 'Draft'], ['ratify', 'Ratify']] : [['propose', 'Independent proposals'], ['review', `${run.rounds} review round${run.rounds !== 1 ? 's' : ''}`], ['synthesize', 'Final synthesis']];
+  const index = run.status === 'complete' ? steps.length : steps.findIndex(([phase]) => phase === run.phase);
+  $('run-progress').innerHTML = steps.map(([, label], i) => `<div class="progress-step ${i < index ? 'done' : i === index ? 'current' : ''}"><span>${i < index ? '✓' : i + 1}</span>${label}</div>`).join('');
+  $('entry-count').textContent = run.entries.length;
+  const tokens = run.entries.reduce((sum, e) => sum + (e.usage?.input || 0) + (e.usage?.output || 0), 0);
+  const done = run.entries.filter(e => e.status === 'complete').length;
+  $('usage').textContent = meeting ? `${done} of up to ${run.plannedCalls} calls${tokens ? `, ${tokens.toLocaleString()} tokens` : ''}` : `${done} of ${run.plannedCalls} calls${tokens ? `, ${tokens.toLocaleString()} tokens` : ''}`;
+  const metricsLine = run.record ? `<p class="record-line">${run.record.metrics.floorTurns} floor turns, ${run.record.metrics.stanceChanges} stance changes, ${run.record.metrics.citedConcessions} cited concessions, ${run.record.metrics.objectionsResolved} of ${run.record.metrics.objectionsRaised} objections resolved${run.record.metrics.ownerInterjections ? `, you spoke ${run.record.metrics.ownerInterjections} time${run.record.metrics.ownerInterjections === 1 ? '' : 's'}` : ''}.</p>` : '';
+  $('answer').innerHTML = run.final ? metricsLine + markdown(run.final) : `<div class="answer-waiting"><span class="${run.status === 'running' ? 'thinking-symbol' : ''}">◈</span><h3>${run.status === 'running' ? (meeting ? 'The meeting is in session.' : 'Good answers are worth a conversation.') : 'The thread is saved.'}</h3><p>${run.status === 'running' ? `Open the ${meeting ? 'Meeting' : 'Discussion'} tab to follow each contribution as it arrives${meeting ? ', or speak to the council below' : ''}.` : 'Review the transcript for completed contributions and connection errors.'}</p></div>`;
+  if (meeting) $('transcript').innerHTML = run.entries.map(e => renderEntry(run, e)).join('');
+  else {
+    const openEntries = new Set([...$('transcript').querySelectorAll('details[open]')].map(el => el.dataset.entry));
+    $('transcript').innerHTML = run.entries.map(e => `<details class="card transcript-entry" data-entry="${e.id}" ${openEntries.has(e.id) || e.status === 'failed' ? 'open' : ''}><summary><span class="entry-status ${e.status}">${e.status === 'complete' ? '✓' : e.status === 'running' ? '◌' : '!'}</span><strong>${escapeHTML(e.name)}</strong><span>${entryTag(run, e)}</span><small>${escapeHTML(e.status)}</small></summary><div class="entry-body">${e.text ? markdown(e.text) : `<p>${escapeHTML(e.error || 'Waiting for this model’s response…')}</p>`}</div></details>`).join('');
+  }
+  const issues = run.issues || [];
+  $('issues').classList.toggle('hidden', !meeting || !issues.length || $('transcript').classList.contains('hidden'));
+  $('issues').innerHTML = `<h3>Objections</h3>` + issues.map(i => `<div class="issue"><b>${escapeHTML(i.id)}</b><span>${escapeHTML(who(run, i.raisedBy))} → ${escapeHTML(who(run, i.against))}: “${escapeHTML(i.claim)}”<br>Resolves when ${escapeHTML(i.condition)}</span><span class="chip ${i.status === 'resolved' ? 'vote-approve' : 'vote-object'}">${i.status}</span></div>`).join('');
+  $('say-form').classList.toggle('hidden', !meeting || run.status !== 'running');
+  $('say-note').textContent = run.pendingOwner?.length ? `${run.pendingOwner.length} message${run.pendingOwner.length === 1 ? '' : 's'} queued for the next turn.` : 'Delivered at the next turn. The next member must address you.';
+  updateEstimate();
+}
+function watchRun(run) {
+  events?.close(); renderRun(run); selectTab(run.status === 'complete' ? 'answer' : 'transcript');
+  if (run.status !== 'running') return;
+  events = new EventSource(`/api/runs/${run.id}/events`);
+  events.onmessage = event => {
+    const value = JSON.parse(event.data), wasRunning = currentRun?.status === 'running'; renderRun(value);
+    // A run watched to completion lands on its answer; a failure stays on the transcript where the error is open.
+    if (wasRunning && value.status === 'complete') selectTab('answer');
+    if (value.status !== 'running') { events.close(); refreshHistory().catch(error => toast(error.message)); }
+  };
+  events.onerror = () => { $('run-error').classList.remove('hidden'); $('run-error').textContent = 'Reconnecting to the local server…'; };
+}
+async function loadRun(id) {
+  try { const run = await api(`/api/runs/${id}`); showPage('workspace'); watchRun(run); renderHistory(); $('discussion').scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  catch (error) { toast(error.message); }
+}
+async function startRun(demo = false) {
+  if (!demo && !$('prompt').value.trim()) { $('prompt').focus(); return toast('Describe what you want your council to work on.'); }
+  $('start').disabled = true; $('demo').disabled = true;
+  try {
+    const run = await api('/api/runs', 'POST', { prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), demo, workspace: demo ? undefined : workspacePayload() });
+    showPage('workspace'); watchRun(run); await refreshHistory(); $('discussion').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (error) { toast(error.message); } finally { $('demo').disabled = false; updateEstimate(); }
+}
+function newDiscussion() {
+  events?.close();
+  // Clear the brief only when it was already submitted as the shown run; an unrelated draft survives a look at history.
+  if (currentRun && $('prompt').value.trim() === currentRun.prompt) $('prompt').value = '';
+  currentRun = null; $('workspace').classList.remove('run-view'); $('discussion').classList.add('hidden'); $('prompt').dispatchEvent(new Event('input')); showPage('workspace'); updateEstimate(); renderHistory(); window.scrollTo({ top: 0, behavior: 'smooth' }); $('prompt').focus();
+}
+// Model suggestions come from the Codex catalog the CLI publishes and the Claude list the app knows; free text is always allowed.
+function modelOptions(type) {
+  if (type === 'codex-cli') return state.clis.codex?.models || [];
+  if (type === 'claude-cli' || type === 'anthropic') return (state.clis.claude?.models || []).filter(m => type === 'claude-cli' || m.id.startsWith('claude-'));
+  return [];
+}
+function applyPreset() {
+  const preset = (state.presets || []).find(p => p.id === $('provider-preset').value);
+  if (!preset) return;
+  $('provider-url').value = preset.baseUrl; if (!$('provider-name').value) $('provider-name').value = preset.label.replace(/ \(.*\)$/, '');
+  $('model-hint').textContent = preset.hint;
+}
+function formType() {
+  const type = $('provider-type').value, cli = state.types[type].cli;
+  $('model-options').innerHTML = modelOptions(type).map(m => `<option value="${escapeHTML(m.id)}">${escapeHTML(m.label && m.label !== m.id ? `${m.label}${m.description ? ' — ' + m.description : ''}` : m.description || '')}</option>`).join('');
+  $('preset-label').classList.toggle('hidden', type !== 'compatible');
+  $('provider-preset').innerHTML = '<option value="">Custom endpoint</option>' + (state.presets || []).filter(p => p.type === 'compatible').map(p => `<option value="${escapeHTML(p.id)}">${escapeHTML(p.label)}</option>`).join('');
+  $('api-key-label').classList.toggle('hidden', cli); $('clear-key-label').classList.toggle('hidden', cli || !editingId);
+  $('base-url-label').classList.toggle('hidden', type !== 'compatible'); $('provider-url').required = type === 'compatible'; $('provider-model').required = !cli;
+  $('provider-model').placeholder = cli ? 'Blank uses the CLI default model' : 'Exact model ID from your provider';
+  const options = modelOptions(type);
+  $('model-hint').textContent = cli ? `Uses your installed ${type === 'codex-cli' ? 'codex' : 'claude'} tool and its active sign-in. ${options.length ? 'Pick a model from the list or type any ID the tool accepts; blank uses its default.' : 'Blank uses the tool’s default model.'}` : type === 'huggingface' ? (state.presets || []).find(p => p.id === 'huggingface')?.hint || '' : 'Use a model available to your API account. Model IDs are editable so you can use new releases.';
+}
+function openProvider(id, duplicateOf) {
+  editingId = id || null; $('provider-form').reset(); $('provider-error').textContent = '';
+  $('dialog-title').textContent = id ? 'Edit connection' : duplicateOf ? 'Add another model' : 'Add a connection';
+  $('delete-connection').classList.toggle('hidden', !id);
+  $('provider-type').innerHTML = Object.entries(state.types).map(([value, t]) => `<option value="${value}">${escapeHTML(t.label)}</option>`).join('');
+  const p = state.providers.find(p => p.id === (id || duplicateOf));
+  if (p) { $('provider-type').value = p.type; $('provider-name').value = duplicateOf ? `${p.name} ` : p.name; $('provider-model').value = duplicateOf ? '' : p.model; $('provider-url').value = p.baseUrl || ''; $('provider-role').value = p.role; }
+  else $('provider-type').value = 'openai';
+  $('provider-key').placeholder = id && p?.hasKey ? 'Leave blank to keep your saved key' : duplicateOf && p?.hasKey ? 'Paste the key again for this connection (keys are never copied)' : 'Paste an API key (or use a server environment key)';
+  archetypeSetup(); $('provider-role').dispatchEvent(new Event('input'));
+  formType(); if (duplicateOf) { $('provider-model').focus(); }
+  $('provider-dialog').showModal();
+}
+$('provider-form').addEventListener('submit', async event => {
+  event.preventDefault(); const button = event.submitter; button.disabled = true;
+  try {
+    const data = { type: $('provider-type').value, name: $('provider-name').value, model: $('provider-model').value, baseUrl: $('provider-url').value, apiKey: $('provider-key').value, clearKey: $('clear-key').checked, role: $('provider-role').value };
+    const saved = await api(editingId ? `/api/providers/${editingId}` : '/api/providers', editingId ? 'PUT' : 'POST', data);
+    if (editingId) state.providers = state.providers.map(p => p.id === editingId ? saved : p); else { state.providers.push(saved); if (state.selected.size < 6) state.selected.add(saved.id); }
+    $('provider-key').value = ''; $('provider-dialog').close(); renderProviders(); toast('Connection saved.');
+  } catch (error) { $('provider-error').textContent = error.message; } finally { button.disabled = false; }
+});
+$('delete-connection').onclick = async () => {
+  try { await api(`/api/providers/${editingId}`, 'DELETE'); state.providers = state.providers.filter(p => p.id !== editingId); $('provider-dialog').close(); renderProviders(); toast('Connection removed.'); }
+  catch (error) { $('provider-error').textContent = error.message; }
+};
+$('provider-dialog').addEventListener('close', () => { $('provider-key').value = ''; });
+$('provider-type').onchange = formType; $('provider-preset').onchange = applyPreset; $('close-dialog').onclick = () => $('provider-dialog').close();
+$('connections-nav').onclick = $('manage-connections').onclick = () => showPage('connections'); $('workspace-nav').onclick = () => showPage('workspace'); $('security-nav').onclick = () => showPage('security');
+// ---------- security page ----------
+let securityEvents;
+const scoreClass = s => s === null || s === undefined ? '' : s <= 30 ? 'ok' : s <= 60 ? 'warn' : 'bad';
+async function loadSecurity() {
+  const data = await api('/api/security'); state.security = data;
+  $('security-off').classList.toggle('hidden', data.agentsec);
+  if (data.vendored) { for (const id of ['agentsec-install-note', 'security-install-note']) $(id).innerHTML = `Unpacks the bundle shipped with this app (agentsec-pack ${escapeHTML(data.vendored.version)}, ${escapeHTML(data.vendored.commit.slice(0, 8))}, packaged ${escapeHTML(data.vendored.date.slice(0, 10))}) into <code>~/agentsec-pack</code> on the host and creates its Python environment. Takes about a minute.`; }
+  renderSecurity();
+  if (!securityEvents) {
+    securityEvents = new EventSource('/api/security/events');
+    securityEvents.onmessage = event => { const value = JSON.parse(event.data); if (value.type === 'finished') { state.security.results = [value.result, ...(state.security.results || []).filter(r => r.id !== value.result.id)]; state.security.running = null; toast(`${value.result.label}: ${value.result.available ? `blast radius ${value.result.score ?? '?'}/100` : value.result.detail}`); } else if (value.type === 'started') state.security.running = value.job; else if (value.type === 'status') Object.assign(state.security, { running: value.running, queued: value.queued }); renderSecurity(); };
+  }
+}
+function renderSecurity() {
+  const data = state.security || { profiles: [], results: [], presets: [] };
+  $('security-status').textContent = data.running ? `Measuring ${data.running.label}` : data.queued?.length ? `${data.queued.length} queued` : 'Idle';
+  const latest = (providerId, mode) => (data.results || []).find(r => r.providerId === providerId && r.mode === mode);
+  $('member-boundaries').innerHTML = data.profiles.map(row => {
+    const r = latest(row.providerId, row.mode);
+    const score = r ? (r.available ? `<span class="score ${scoreClass(r.score)}">${r.score ?? '?'}</span>` : '<span class="score warn">—</span>') : '<span class="score"></span>';
+    const detail = r ? `<small>${escapeHTML(r.detail || '')}${r.secrets?.filter(s => s.readable).length ? ` Readable: ${r.secrets.filter(s => s.readable).map(s => escapeHTML(s.path)).join(', ')}.` : ''}</small>` : '<small>Not measured yet.</small>';
+    const busy = data.running && data.running.label === `${row.name} (${row.mode})`;
+    return `<div class="boundary"><div><strong>${escapeHTML(row.name)}</strong><small>${escapeHTML(row.model || row.type)}</small></div><span class="mode">${escapeHTML(row.mode)}</span><div>${escapeHTML(row.boundary)}${detail}</div><div>${score} ${row.measurable ? `<button type="button" class="text-button" data-measure="${escapeHTML(row.providerId)}" data-mode="${escapeHTML(row.mode)}" ${busy ? 'disabled' : ''}>${busy ? 'Measuring…' : r ? 'Measure again' : 'Measure'}</button>` : ''}</div></div>`;
+  }).join('');
+  $('member-boundaries').querySelectorAll('[data-measure]').forEach(b => b.onclick = async () => { b.disabled = true; try { await api('/api/security/run', 'POST', { kind: 'member', providerId: b.dataset.measure, mode: b.dataset.mode }); toast('Queued. Results appear here when the measurement finishes.'); } catch (error) { toast(error.message); b.disabled = false; } });
+  const current = $('lab-preset').value;
+  $('lab-preset').innerHTML = (data.presets || []).map(p => `<option value="${escapeHTML(p.name)}" ${p.available ? '' : 'disabled'}>${escapeHTML(p.name)}${p.available ? '' : ` (needs ${escapeHTML(p.needs)})`}</option>`).join('');
+  if (current) $('lab-preset').value = current;
+  labPresetChanged();
+  $('security-results').innerHTML = (data.results || []).map(r => `<div class="result"><header><span class="score ${r.available ? scoreClass(r.score) : 'warn'}">${r.available ? `${r.score ?? '?'}/100` : 'no result'}</span><strong>${escapeHTML(r.label)}</strong><span class="chip">${escapeHTML(r.kind)}</span>${r.selfMeasured ? '<span class="chip opinion">member measured itself</span>' : ''}<small>${new Date(r.at).toLocaleString()}</small><button type="button" class="text-button danger" data-remove="${r.id}">Remove</button></header><small>${escapeHTML(r.detail || '')}</small>${r.findings?.length ? `<ul>${r.findings.map(f => `<li><b>${escapeHTML(f.severity)}</b> ${escapeHTML(f.id)} ${escapeHTML(f.title)}</li>`).join('')}</ul>` : ''}${r.secrets?.filter(s => s.readable).length ? `<small>Readable from inside: ${r.secrets.filter(s => s.readable).map(s => escapeHTML(s.path)).join(', ')}</small>` : ''}</div>`).join('') || '<p class="empty-copy">No measurements yet.</p>';
+  $('security-results').querySelectorAll('[data-remove]').forEach(b => b.onclick = async () => { try { await api(`/api/security/results/${b.dataset.remove}`, 'DELETE'); state.security.results = state.security.results.filter(r => r.id !== b.dataset.remove); renderSecurity(); } catch (error) { toast(error.message); } });
+}
+function labPresetChanged() {
+  const preset = (state.security?.presets || []).find(p => p.name === $('lab-preset').value);
+  $('lab-image-label').classList.toggle('hidden', preset?.kind !== 'container');
+  $('lab-rationale').textContent = preset?.rationale || '';
+}
+// Installing agentsec-pack from the page: one job, its log streamed into the box the button lives in.
+async function installAgentsec(button, logBox) {
+  button.disabled = true; logBox.classList.remove('hidden'); logBox.textContent = 'Starting…\n';
+  try {
+    const job = await api('/api/security/install', 'POST');
+    const events = new EventSource('/api/security/events');
+    events.onmessage = async event => {
+      const value = JSON.parse(event.data);
+      if (value.type === 'log' && value.id === job.id) { logBox.textContent += value.line + '\n'; logBox.scrollTop = logBox.scrollHeight; }
+      if (value.type === 'finished' && value.result.id === job.id) {
+        events.close(); logBox.textContent += (value.result.available ? 'Done. ' : 'Failed. ') + value.result.detail + '\n'; button.disabled = false;
+        if (value.result.available) { toast(value.result.detail); try { state.workspaceConfig = await api('/api/workspace'); workspaceSetup(); } catch {} if (!$('security').classList.contains('hidden')) loadSecurity().catch(() => {}); }
+      }
+    };
+  } catch (error) { toast(error.message); logBox.textContent += error.message + '\n'; button.disabled = false; }
+}
+$('agentsec-install').onclick = () => installAgentsec($('agentsec-install'), $('agentsec-install-log'));
+$('security-install').onclick = () => installAgentsec($('security-install'), $('security-install-log'));
+$('lab-preset').onchange = labPresetChanged;
+$('lab-run').onclick = async () => {
+  $('lab-run').disabled = true;
+  try { await api('/api/security/run', 'POST', { kind: 'preset', preset: $('lab-preset').value, image: $('lab-image').value.trim() }); toast('Queued. Container runs can take a few minutes.'); }
+  catch (error) { toast(error.message); } finally { $('lab-run').disabled = false; }
+};
+$('add-connection').onclick = () => openProvider(); $('new-discussion').onclick = newDiscussion;
+$('help-button').onclick = () => $('help-dialog').showModal(); $('theme-toggle').onclick = () => window.meshTheme?.toggle(); $('close-help').onclick = () => $('help-dialog').close();
+$('lan-button').onclick = async () => {
+  try { const access = await api('/api/access'); $('lan-code').value = access.pairingCode; $('lan-urls').innerHTML = access.urls.map(url => `<p><a href="${escapeHTML(url)}" target="_blank" rel="noreferrer">${escapeHTML(url)} ↗</a></p>`).join('') || '<p>No LAN address was detected. Restart the app after connecting to your network.</p>'; $('lan-dialog').showModal(); }
+  catch (error) { toast(error.message); }
+};
+$('close-lan').onclick = () => $('lan-dialog').close();
+$('rotate-lan-code').onclick = async () => { try { const access = await api('/api/access/rotate', 'POST'); $('lan-code').value = access.pairingCode; toast('Pairing code rotated. Every paired device must enter the new code.'); } catch (error) { toast(error.message); } };
+$('lan-dialog').addEventListener('close', () => { $('lan-code').value = ''; });
+$('copy-lan-code').onclick = async () => { try { await navigator.clipboard.writeText($('lan-code').value); toast('Pairing code copied.'); } catch { $('lan-code').select(); toast('Select and copy the code with your keyboard.'); } };
+$('prompt').oninput = () => { $('char-count').textContent = `${$('prompt').value.length.toLocaleString()} / 24,000`; saveDraft(); };
+$('rounds').onchange = () => { updateEstimate(); saveDraft(); };
+$('synthesizer').onchange = $('max-tokens').onchange = $('timeout').onchange = saveDraft;
+$('say-form').addEventListener('submit', async event => {
+  event.preventDefault(); const text = $('say-text').value.trim(); if (!text || !currentRun) return;
+  const button = event.submitter; button.disabled = true;
+  try { await api(`/api/runs/${currentRun.id}/say`, 'POST', { text }); $('say-text').value = ''; toast('Delivered. The next member will address you.'); }
+  catch (error) { toast(error.message); } finally { button.disabled = false; }
+});
+$('root-browse').onclick = () => { if (!$('root-browser').classList.contains('hidden')) return $('root-browser').classList.add('hidden'); browseHostTo($('root-path').value.trim()); };
+$('root-add').onclick = async () => {
+  $('root-add').disabled = true;
+  try { state.workspaceConfig = { ...(state.workspaceConfig || {}), ...(await api('/api/workspace/roots', 'POST', { path: $('root-path').value.trim() })) }; $('root-path').value = ''; workspaceSetup(); toast('Directory allowed. Pick a project inside it.'); }
+  catch (error) { toast(error.message); } finally { $('root-add').disabled = false; }
+};
+$('budget-save').onclick = async () => { try { const { maxScore } = await api('/api/workspace/budget', 'POST', { maxScore: $('workspace-budget').value.trim() === '' ? null : Number($('workspace-budget').value) }); state.workspaceConfig = { ...(state.workspaceConfig || {}), maxScore }; toast(maxScore === null ? 'Budget cleared.' : `Levels scoring above ${maxScore} will be refused.`); } catch (error) { toast(error.message); } };
+$('workspace-inspect').onclick = async () => {
+  $('workspace-inspect').disabled = true;
+  try { renderWorkspaceInfo(await api('/api/workspace/inspect', 'POST', { path: $('workspace-path').value.trim() })); saveDraft(); }
+  catch (error) { toast(error.message); $('workspace-info').classList.add('hidden'); state.workspaceInfo = null; }
+  finally { $('workspace-inspect').disabled = false; }
+};
+document.querySelectorAll('input[name=workspace-level]').forEach(input => input.onchange = workspaceLevelChanged);
+$('workspace-checks').onchange = saveDraft;
+$('apply').onclick = async () => { $('apply').disabled = true; try { const result = await api(`/api/runs/${currentRun.id}/apply`, 'POST'); toast(`Applied into ${result.into}.`); renderRun(await api(`/api/runs/${currentRun.id}`)); } catch (error) { toast(error.message); $('apply').disabled = false; } };
+$('discard').onclick = async () => { $('discard').disabled = true; try { await api(`/api/runs/${currentRun.id}/discard`, 'POST'); toast('Candidate branch discarded.'); renderRun(await api(`/api/runs/${currentRun.id}`)); } catch (error) { toast(error.message); $('discard').disabled = false; } };
+$('resume').onclick = async () => {
+  $('resume').disabled = true;
+  try { const run = await api(`/api/runs/${currentRun.id}/resume`, 'POST'); watchRun(run); await refreshHistory(); }
+  catch (error) { toast(error.message); $('resume').disabled = false; }
+};
+document.querySelectorAll('[data-example]').forEach(button => button.onclick = () => { $('prompt').value = button.dataset.example; $('prompt').dispatchEvent(new Event('input')); $('prompt').focus(); });
+document.querySelectorAll('[data-tab]').forEach(button => button.onclick = () => selectTab(button.dataset.tab));
+$('start').onclick = () => startRun(); $('demo').onclick = () => startRun(true);
+$('cancel').onclick = async () => { $('cancel').disabled = true; try { await api(`/api/runs/${currentRun.id}/cancel`, 'POST'); } catch (error) { toast(error.message); $('cancel').disabled = false; } };
+$('reuse').onclick = () => { const prompt = currentRun.prompt; newDiscussion(); $('prompt').value = prompt; $('prompt').dispatchEvent(new Event('input')); };
+(async () => {
+  try {
+    const bootstrap = await api('/api/bootstrap'); Object.assign(state, bootstrap);
+    $('lan-button').classList.toggle('hidden', !state.local); $('session-label').textContent = state.local ? 'Local session' : 'Paired LAN session';
+    if (!state.local) { $('footer-title').textContent = 'Shared workspace'; $('footer-sub').textContent = 'Paired over your LAN'; $('footer-label').textContent = 'LAN'; }
+    const draft = readDraft(), restored = (draft.selected || []).filter(id => state.providers.some(p => p.id === id));
+    state.selected = new Set(restored.length ? restored : state.providers.slice(0, 2).map(p => p.id));
+    if (draft.prompt) $('prompt').value = draft.prompt;
+    for (const [id, value] of [['rounds', draft.rounds], ['max-tokens', draft.maxTokens], ['timeout', draft.timeout]]) if (value) $(id).value = value;
+    renderProviders(); if (draft.synthesizer && state.selected.has(draft.synthesizer)) $('synthesizer').value = draft.synthesizer;
+    if (draft.workspacePath) $('workspace-path').value = draft.workspacePath; if (draft.workspaceChecks) $('workspace-checks').value = draft.workspaceChecks;
+    try { state.workspaceConfig = await api('/api/workspace'); } catch { state.workspaceConfig = {}; }
+    workspaceSetup();
+    $('char-count').textContent = `${$('prompt').value.length.toLocaleString()} / 24,000`;
+    renderHistory(); const active = state.runs.find(r => r.status === 'running'); if (active) await loadRun(active.id);
+  }
+  catch (error) { toast(`Could not connect to the local server: ${error.message}`); $('start').disabled = true; }
+})();

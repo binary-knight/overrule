@@ -1,0 +1,142 @@
+# Model Mesh
+
+A private web workspace where models hold a meeting: they open independently, then argue on a shared floor with objections, concessions, and a vote on the final deliverable. Runs locally, with no runtime dependencies beyond Node.js 22 or newer.
+
+## Start
+
+```sh
+cd /home/jknight/model-mesh
+npm start
+```
+
+Open **http://localhost:4310**. Choose **Try a scripted demo** to explore without using any provider credits. Set `PORT=4311` if the default port is busy. The server binds to `0.0.0.0` for LAN access. Set `MESH_HOST=127.0.0.1` for access from this machine only.
+
+The interface follows your system's light or dark preference. The moon or sun button in the top bar overrides it for this browser; the choice is stored in the browser's local storage.
+
+## Access from your local network
+
+On the host machine, open **http://localhost:4310 → LAN access**. It shows the machine's detected IPv4 LAN URLs and a pairing code. On another device on the same network, open one of those URLs and enter the code. The current machine's address at setup was **http://192.168.160.224:4310**; DHCP may change it.
+
+The pairing code is new on every server start and can be rotated from the LAN access dialog, which signs out every paired device; it is also saved in the owner-readable `data/lan.json` file for headless setup. Paired devices can use all configured providers and read the shared history. Sessions last at most 24 hours and are invalidated by a server restart. Only a browser connecting through localhost can retrieve the pairing code from the app. Wrong-code attempts are rate limited. Restart the app if its network addresses change. If another device cannot connect, check that both devices are on the same LAN and that the host firewall permits inbound TCP 4310 from that LAN; the app does not modify the firewall.
+
+LAN traffic uses HTTP. Use it on your trusted network; an untrusted network requires HTTPS or a trusted encrypted tunnel. No public Internet deployment or port forwarding is configured.
+
+## Connect your models
+
+The default council contains Codex and Claude Code. Install current versions of their official CLIs if needed, then sign in **in your own terminal**:
+
+```sh
+codex login
+claude auth login
+```
+
+Connection cards check each CLI's own sign-in status (`codex login status` and `claude auth status`) when the app starts and whenever you use **Check sign-in**. A CLI that reports it is signed out blocks a discussion before any call is spent; the app probes once more first in case you signed in since the last check. Older CLIs that cannot report status show as unchecked and are not blocked. Live errors appear in the discussion. CLI connections use each tool's active authentication, including its normal environment-variable precedence. The app never reads or imports their token files. Leave the model field blank for the tool's default, or enter an explicit model ID. Codex user configuration is ignored for isolated execution; a model selected in your ordinary Codex configuration is therefore not inherited.
+
+Add further connections from **Connections → Add connection**:
+
+| Connection | Authentication | Protocol |
+| --- | --- | --- |
+| Codex local | Official CLI's active sign-in | `codex exec --json` |
+| Claude Code local | Official CLI's active sign-in | `claude --print --output-format json` |
+| OpenAI API | Saved key or `OPENAI_API_KEY` | Responses API |
+| Anthropic API | Saved key or `ANTHROPIC_API_KEY` | Messages API |
+| Gemini API | Saved key or `GEMINI_API_KEY` | Google's OpenAI compatibility endpoint |
+| Grok API | Saved key or `XAI_API_KEY` | Chat Completions API |
+| Hugging Face Inference Providers | Saved token or `HF_TOKEN` | OpenAI-compatible chat completions via the HF router |
+| OpenAI-compatible | Optional saved key | Custom `/chat/completions` endpoint |
+
+### Choosing models
+
+Every connection names one model, and you can hold as many connections per provider as you like, so a council can seat GPT-5.6 Sol, GPT-6 Astra, Claude Opus 5, Claude Fable 5.1, and a local model side by side. Use **Add another model** on a connection card to add a sibling with a different model; the model field offers Codex's own catalog (read from `codex debug models`) or the Claude list, and always accepts any ID the tool or API understands. Leaving a CLI connection's model blank uses the tool's default. A meeting seats 2–8 members; every member is a separate voice, and turns run one at a time, so eight members is a long meeting.
+
+Open and local models use the **OpenAI-compatible** type with a preset: Ollama, LM Studio, vLLM, and llama.cpp servers on this machine, or **Hugging Face Inference Providers** (a separate type) for hosted open-weight models through `https://router.huggingface.co/v1` with a Hugging Face token; the model ID there is the Hub name, optionally with a `:provider` or `:cheapest` suffix. Gemini and Grok use their API types.
+
+For compatible services, supply a **base URL** such as `https://provider.example/v1` or `http://localhost:11434/v1`, not the full chat-completions URL. Remote endpoints require HTTPS. Redirects are rejected to prevent forwarding credentials. Other providers can be used when they implement this protocol; arbitrary OAuth flows and provider-specific noncompatible APIs require another adapter. Enter a model available to your account. Provider keys are never sent back to the browser after saving.
+
+Subscription access is not a general API credential. This personal app invokes unmodified local tools and leaves sign-in with the vendor. Native API connections use separate provider API billing. Gemini and Grok subscription sign-in are not implemented. CLI account eligibility and limits remain controlled by the provider. Do not turn this into a shared subscription proxy.
+
+## How a meeting runs
+
+1. Select 2–8 members and give each an optional perspective (builder, critic, domain expert, etc.). Multiple models from one provider are supported. Choose the meeting length in cycles (a cycle is one turn per member) and which member drafts the deliverable.
+2. **Opening.** Every member writes a position without seeing the others: a proposed approach, key assumptions, the principal risk, and acceptance criteria. Openings are revealed together so no member anchors the rest.
+3. **Floor.** Members speak one at a time, each reading the whole thread. A turn must quote the exact claim it answers before rebutting or conceding. Objections carry the claim they touch and a concrete condition that would resolve them, get a stable id, and stay open until the member who raised them assesses that condition. A member who moves from disagree to agree must cite the entry and quote that changed its mind; an uncited change is re-asked once and otherwise recorded as disagree. Each turn ends with a stance (agree, disagree, need-info) and nominates the next speaker. The next turn goes to the target of an unanswered objection when one exists, otherwise the nominee, otherwise the member heard least recently.
+4. **You can speak.** Anything you say is delivered at the next turn boundary; the meeting pauses for it and the next member must address it, quoting you. Speaking after a candidate exists invalidates the ballots on it and the candidate is redrawn.
+5. **Closing.** The floor closes by consensus (every member at agree with no objection open, checked at the end of each cycle), on budget when the cycles run out, or as stalled when two full cycles pass with no change in stance or objections. The reason is recorded.
+6. **Draft and ratify.** The drafter writes the candidate. Every other member votes independently on that exact text (approve, object with claim and condition, or abstain); ballots are revealed together. If any member objects, the drafter revises once and the members vote again. The final answer is the candidate plus the council record: the close reason, the vote, objections on record verbatim, and any objection still open from the floor.
+
+A meeting that reaches unanimous agreement from the first floor turn with no cited concession and no objection is labeled **no deliberation occurred**. Treat that result as one answer, not a council decision. Missing responses and abstentions are never counted as agreement. These controls reduce performative agreement; they cannot establish correctness. Independently validate important outputs.
+
+The estimate before Start is an upper bound: openings, one turn per member per cycle, the draft, the ballots, one revision with its ballots, and one re-ask per member. Turns run one at a time and each reads the whole thread, so a three-member, three-cycle meeting at CLI speeds takes ten to twenty minutes. There are no automatic retries or hidden model substitutions. A member whose opening fails does not take part; a member whose floor turn fails is skipped, and dropped after two consecutive failures. The meeting continues while two members remain. A failed drafter marks the meeting failed with the thread intact, and **Resume** continues from the last committed entry, re-running only what was missing; failed and superseded attempts never re-enter the thread.
+
+Progress uses server-sent events as each contribution begins and completes; individual token streaming is not implemented yet. Runs survive page refreshes. Restarting the server marks unfinished meetings interrupted, which can then be resumed. Your draft brief and council settings are saved in the browser's local storage and restored after a refresh, an expired pairing, or a server restart. Once a meeting is shown, the composer is hidden until you choose **New discussion**; a draft that differs from the shown meeting's prompt is kept. Recent history retains up to 30 completed meetings, with active ones preserved. Discussions recorded before meetings existed remain readable and exportable but cannot be resumed. Exports contain the prompt, the final answer with the council record, every objection, the meeting metrics, and the full transcript with each contribution's structured fields. The scripted demo is clearly labeled and uses no model calls.
+
+## Giving the council a workspace
+
+By default no member touches your machine: CLI members run in an empty temporary directory with tools off, and API members have no tools. To let the council work on code, allow one or more directories from the **Workspace** section of the composer (for example `~/projects`); they are saved in `data/workspaces.json`, and `MESH_WORKSPACE_ROOT` only seeds the list at startup. Then browse into an allowed directory, pick the project folder, press **Inspect**, and choose an access level. The app refuses system directories, your home directory itself (its hidden folders hold your credentials), the app's own directory and data, hidden directories, symlinked paths, and anything outside an allowed directory; it also warns when the tree holds files that look like secrets and asks you to acknowledge that before members read them. Paired devices can attach workspaces too, because the owner runs this server headless and works from other machines: the directory and the execution are on the host, and the meeting records which address attached the workspace. That makes the pairing code the key to sandboxed code execution under your workspace root. LAN traffic is plain HTTP, so anyone who can read your network traffic and obtain the code gets that execution too: use it only on a network you trust, share the code only with your own devices, and rotate it from the LAN access dialog or restart the app if it may have leaked. Every gate is enforced by the server on the attach request itself, regardless of where it came from, so a client that skips the interface meets the same refusals. The council advised against this and the owner overruled it; the sandbox levels, root confinement, canaries, and git isolation apply regardless of where the request came from.
+
+- **Talk only.** The default. Nothing runs.
+- **Read-only tools.** Every CLI member reads the workspace on the floor. Codex members run inside Codex's own operating-system sandbox (`--sandbox read-only`): writes and network are blocked. The workspace is what members are pointed at; the read-only sandbox does not stop a member from reading other files your account can read, which is one more reason to keep secrets out of the account that runs the app. Claude Code members run with `--restricted` and no shell, edit, or web tools: file reads are confined to the workspace by Claude Code's permission layer, which is not an operating-system boundary. The meeting labels each contribution with the checkout and level it ran under.
+- **Workspace-write.** Requires a git repository at the workspace root with a clean tree (or your acknowledgement). The floor stays read-only. When the floor closes, the drafter, a Codex or Claude Code member, implements in an isolated `git worktree` on a new `mesh/<id>` branch under `--sandbox workspace-write` with network off unless you allow it. The controller commits what it leaves behind (`--no-verify`, hooks ignored, since a member could write them) as the candidate; the diff is the candidate, shown in the meeting and downloadable as a patch. Checks you list (for example `npm test`) run once per candidate commit in a fresh checkout under the same sandbox, and their command, exit code, and output go to every voter. A ballot on a candidate without checks is labeled an opinion. Your working tree is never touched until you press **Apply**, which merges the candidate into your checked-out branch and refuses a dirty tree; **Discard** deletes the branch. Applying cannot undo external effects and does not recover untracked files.
+
+Repository text is treated as untrusted input to members: Codex runs with `project_doc_max_bytes=0` so it does not read `AGENTS.md`, and Claude Code runs in safe mode so it does not discover `CLAUDE.md`. To confirm both the sandbox boundary and this on your machine, run from inside a scratch git repository:
+
+```sh
+node -e "import('/home/jknight/model-mesh/lib/workspace.mjs').then(m => m.codexCanary('workspace-write', process.cwd())).then(r => console.log(JSON.stringify(r, null, 2)))"
+echo 'MARKER_DO_NOT_READ' > AGENTS.md && codex exec -C . -c project_doc_max_bytes=0 --sandbox read-only 'Reply with the word MARKER if any instruction file mentions it, otherwise reply NO.'
+```
+
+### Installing agentsec-pack from the app
+
+This repository vendors the latest agentsec-pack source under `vendor/` (a tarball plus `vendor/agentsec.json` naming its version, commit, and packaging date). When the tool is missing on the host, the Workspace section and the Security page show an **Install agentsec-pack** button: it unpacks that bundle into `~/agentsec-pack`, creates a Python virtual environment there, installs the package, runs `agentsec presets` as a check, and streams every command into the page. The install runs on the host under the account that runs the app, and it needs Python 3.10 or newer; `pip` fetches the Python build tooling (setuptools) from PyPI once, so the host needs that much network access. The tool has no other runtime dependencies. Without a vendored bundle the installer clones the public repository instead.
+
+`scripts/package-agentsec.sh [path-to-checkout]` rebuilds the bundle by hand. The **Package agentsec-pack** workflow does it daily and on demand: it clones the latest source, proves the bundle installs and runs in a fresh environment, and commits the new tarball when it changed. The **Tests** workflow runs `npm test` on every push and pull request.
+
+### Measuring the boundary with agentsec-pack
+
+If [agentsec-pack](https://github.com/binary-knight/agentsec-pack) is installed (found at `~/agentsec-pack/.venv/bin/agentsec`, `~/.local/bin/agentsec`, or the path in `MESH_AGENTSEC`), Inspect also runs its blast-radius probe and path assertions inside each Codex sandbox level and shows the score, every finding above informational, and which of the app's own secret files and the account's credential files are readable from inside. The measurement is recorded with each meeting that uses the workspace. A **blast-radius budget** in the Workspace section refuses any level whose score exceeds it; leave it blank to see the number and decide yourself. The first measurement on this machine showed what the built-in canary cannot: from the read-only level a member can read `data/vault.key`, the encrypted provider file beside it, `~/.ssh`, and the CLIs' own credential files, because Codex's read-only sandbox has no per-path read denial. Run the app under an account that holds no personal credentials if that matters to you.
+
+CLI members and every other child process receive a minimal environment: home, path, locale, proxy and certificate variables, and the CLIs' own config-directory variables. Provider API keys and anything else in the server's environment do not reach a member. To pass specific variables through anyway, list them in `MESH_CLI_ENV_PASSTHROUGH=NAME1,NAME2` when starting the app; a CLI that relied on an API key from the environment needs that or its own sign-in.
+
+- **Full access.** No boundary, offered because this is your machine and your call. Codex runs with its sandbox off and approvals off; Claude Code runs with every permission check off. Every member with tools can do anything your account can do: read this app's own vault key and encrypted provider file and decrypt every saved key, read your SSH and CLI credential files, reach the network, and change or delete anything, including your real working tree, and send any of it to its provider through the normal course of a turn. Text in the repository or a message from another member can steer that. The candidate branch and apply/discard still exist, but they are conveniences, not containment. Full access requires an acknowledgement checkbox for every meeting, is never remembered, is shown in red on the meeting, and its measurement is recorded like any other. The council advised against offering it at all; the owner overruled that, and the warning is the compromise.
+
+A **Claude Code implementer** at workspace-write runs with edits and shell allowed inside Claude Code's own bubblewrap sandbox, generated per call so that writes land only in the checkout, the network is off, and an unsandboxed retry is refused. If this machine cannot start that sandbox (Ubuntu 24.04 restricts unprivileged user namespaces by default), the draft fails with a plain message; untick the sandbox option to run the implementer on Claude Code's permission layer alone, which is not an operating-system boundary. Measure it from the Security page before trusting either.
+
+### The Security page
+
+The Security page shows one row per member per way this app launches it (talk, read-only, workspace-write, full access), states the boundary in words, and can measure it with agentsec-pack through the exact launcher a meeting would use. Claude Code rows are measured by asking that member to run the probe inside its own launch, which spends one call and is labeled as the member measuring itself. API members never execute anything and have nothing to measure. Below that, the sandbox lab runs any named agentsec configuration, or a container preset against an image you name, so you can measure, apply the recommended flags, and measure again; results persist under the app's data, and agentsec renders its own self-contained HTML report over them. A browser cannot supply a launcher template, only choose a preset or a member, for the same reason agentsec's own console refuses to; the server rejects anything else. You can skip the agentsec measurement for a meeting with a checkbox; the choice is recorded with the meeting.
+
+Before any level is offered, the app runs a canary under that Codex sandbox level on this machine: a write inside must succeed only at write level, and a write outside the directory and a proxy-ignoring socket open must fail. A level whose canary does not hold is refused, and the result is shown with the inspection and recorded with the meeting. Full machine access is offered as a level of its own, with the warning above.
+
+Read this plainly: **this runs code chosen by models with whatever access you grant. Text in the repository and messages from other members can steer a member into commands you never asked for. Anything in the tree can reach the model providers, so point it at a scratch clone and never at a tree holding secrets. Git rollback and the activity log limit damage; they do not guarantee safety.** Tool activity (commands run, files changed) is captured from the CLI event streams and shown per contribution; treat it as telemetry that may be incomplete.
+
+## Limits and privacy
+
+- API token limits apply per call, including reasoning tokens where the provider counts them. CLI token limits are controlled by the native CLI/model; the UI clearly distinguishes these. Timeouts apply to all connections. These are not dollar budgets.
+- A prompt can contain 24,000 characters. Individual returned answers are capped at 100,000 characters. The thread each turn reads never truncates the prompt or the opening positions, keeps the last six floor turns in full, reduces older turns to their structured fields, and caps each contribution at 12,000 characters with a truncation mark. Large councils and long meetings can exceed a provider's context window and will show a failure.
+- This version produces text and code; it does not execute proposed solutions or provide browsing, file uploads, repository editing, or image generation. More models do not guarantee correctness. Independently validate important outputs.
+- API keys use AES-256-GCM encryption. The key is stored in `data/vault.key` with mode 0600; data directory mode is 0700. Someone with access to your OS account or both files can decrypt the keys. Back up the complete directory privately. History contains unencrypted prompts and answers in an owner-readable file.
+- The app is one shared workspace for its owner and paired LAN devices. It accepts only Host headers for localhost and detected interface IPs, rejects cross-origin requests and writes without a per-process CSRF token, and requires pairing for LAN requests. Sessions use signed, expiring HttpOnly/SameSite cookies. It does not separate users or offer per-user provider credentials. Do not expose it publicly without HTTPS, stronger account management, and a review of the trust model.
+- CLI prompts are passed over stdin, with fixed executables and no shell interpolation. Runs use temporary empty working directories, disable normal customizations and tool execution, and retain provider-managed authentication. Admin-managed CLI settings still apply. Current CLI versions are required for the isolation flags. Cancellation sends termination signals to local subprocess groups and aborts HTTP requests; upstream providers may charge for already-started work.
+- The app does not log keys or raw provider error bodies. Provider responses are escaped before rendering. Your selected providers receive the prompt and peer contributions, including text originally produced by other providers.
+
+## Development and verification
+
+```sh
+npm test
+npm run check
+```
+
+Tests cover the meeting itself (turns reading earlier turns, objections by id, the uncited-flip re-ask, consensus, budget and stalled closes, owner interjections invalidating ballots, unparsed structured blocks, failed and dropped members), resume by sequence, legacy history, cancellation, interrupted runs, the CLI readiness probe, key encryption, validation, provider request/response formats, LAN authentication, origin/CSRF protection, persistence, and Markdown export. Automated tests use mocked inference and do not consume model credits. The browser smoke test is in `scripts/browser-check.mjs`; set `PLAYWRIGHT_MODULE` to an installed Playwright module when running it. It uses a temporary isolated data directory, verifies the LAN pairing screen over an actual interface address, and saves screenshots under `artifacts/`.
+
+An optional `node scripts/live-check.mjs` runs a real two-member, one-cycle Codex/Claude meeting against an already running app and consumes the active CLIs' allowance. It exits non-zero if any real turn failed to end with a parseable structured block, since such a meeting closes on budget and proves nothing. The meeting engine has not yet been validated against live models; run this check after starting the app.
+
+The implementation is intentionally small: `server.mjs` serves the HTTP API and frontend; `lib/providers.mjs` holds adapters; `lib/meeting.mjs` holds the pure meeting logic (rules of order, prompts, structured-field parsing, speaker order, planning, metrics); `lib/mesh.mjs` runs meetings and persists them; `lib/store.mjs` stores local state; `public/` contains the UI. A new provider needs a connection definition, validation, request/response adapter, and tests. Set `MESH_DATA_DIR` to use another private data directory.
+
+## Provider references checked September 16, 2026
+
+- [Official OpenAI documentation: Codex authentication](https://learn.chatgpt.com/docs/auth) and [non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)
+- [OpenAI Responses API](https://developers.openai.com/api/reference/cli/resources/responses/methods/create)
+- [Claude Code programmatic use](https://code.claude.com/docs/en/headless), [authentication](https://code.claude.com/docs/en/authentication), and [credential use](https://code.claude.com/docs/en/legal-and-compliance)
+- [Anthropic Messages API](https://platform.claude.com/docs/en/api/http/beta/messages/create)
+- [Gemini OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai)
+- [Grok Chat Completions](https://docs.x.ai/developers/model-capabilities/legacy/chat-completions)
