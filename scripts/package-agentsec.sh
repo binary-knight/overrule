@@ -29,6 +29,11 @@ version="$(grep -m1 '^version' "$SRC/pyproject.toml" | sed 's/.*"\(.*\)".*/\1/')
 file="agentsec-pack-${version}-${short}.tar.gz"
 rm -f "$OUT"/agentsec-pack-*.tar.gz
 git -C "$SRC" archive --format=tar.gz --prefix=agentsec-pack/ -o "$PWD/$OUT/$file" HEAD
-printf '{"version":"%s","commit":"%s","date":"%s","file":"%s","source":"https://github.com/binary-knight/agentsec-pack"}\n' "$version" "$commit" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$file" > "$OUT/agentsec.json"
+# Keep the packaging date when the commit is unchanged, so a daily run does not produce a new commit for a timestamp alone.
+date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if [ -f "$OUT/agentsec.json" ] && grep -q "\"commit\":\"$commit\"" "$OUT/agentsec.json"; then
+  date="$(sed 's/.*"date":"\([^"]*\)".*/\1/' "$OUT/agentsec.json")"
+fi
+printf '{"version":"%s","commit":"%s","date":"%s","file":"%s","source":"https://github.com/binary-knight/agentsec-pack"}\n' "$version" "$commit" "$date" "$file" > "$OUT/agentsec.json"
 [ -n "$cleanup" ] && rm -rf "$cleanup"
 echo "packaged $file ($commit)"
