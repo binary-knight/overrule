@@ -1,6 +1,10 @@
 name: Package agentsec-pack
 # Pulls the latest agentsec-pack source, checks that it installs and runs, and commits it into vendor/ so the app can install
 # it on a host from this repository alone. Runs daily and on demand.
+# agentsec-pack is a private repository, so the clone needs the AGENTSEC_PACK_TOKEN secret: a fine-grained personal access token
+# with "Contents: read" on binary-knight/agentsec-pack. Add it with:
+#   gh secret set AGENTSEC_PACK_TOKEN -R binary-knight/model-mesh
+# The job's own GITHUB_TOKEN cannot read other repositories, so without the secret the packaging step stops with that message.
 on:
   schedule:
     - cron: '17 6 * * *'
@@ -16,7 +20,14 @@ jobs:
         with:
           python-version: '3.12'
       - name: Package the latest source into vendor/
-        run: scripts/package-agentsec.sh
+        env:
+          AGENTSEC_PACK_TOKEN: ${{ secrets.AGENTSEC_PACK_TOKEN }}
+        run: |
+          if [ -z "$AGENTSEC_PACK_TOKEN" ]; then
+            echo "::error::The AGENTSEC_PACK_TOKEN secret is not set. agentsec-pack is private, so add a fine-grained token with Contents: read on binary-knight/agentsec-pack: gh secret set AGENTSEC_PACK_TOKEN -R binary-knight/model-mesh"
+            exit 1
+          fi
+          scripts/package-agentsec.sh
       - name: Prove the bundle installs and runs
         run: |
           set -euo pipefail
