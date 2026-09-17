@@ -633,7 +633,7 @@ test('allowed directories from an older data file become recent workspaces, whic
 import { deflateRawSync, crc32 } from 'node:zlib';
 import { Readable } from 'node:stream';
 import { Attachments, extractText, zipEntries, zipRead, cleanName, MAX_FILE_BYTES } from '../lib/attachments.mjs';
-import { documentsSection, rulesFor, DOCUMENT_CAP } from '../lib/meeting.mjs';
+import { documentsSection, rulesFor, DOCUMENT_CAP, thread, plan, activeMembers, metrics } from '../lib/meeting.mjs';
 // A minimal zip writer for fixtures: deflate entries, one central directory. `flags` lets a test mark an entry encrypted.
 function zipOf(files) {
   const locals = [], central = []; let offset = 0;
@@ -687,7 +687,7 @@ test('the documents section shares one budget, marks truncation, and the rules c
   assert.equal(cleanName('C:\\Users\\me\\..\\Q3 plan.pdf'), 'Q3 plan.pdf'); assert.equal(cleanName('../../etc/passwd.txt'), 'passwd.txt'); assert.throws(() => cleanName('..'), /needs a name/);
 });
 
-test('documents are staged, claimed by a meeting, read by every member, and removed when it closes', async t => {
+test('documents are staged, claimed by a meeting, read by every member; files leave when it closes and the text stays for reconvening', async t => {
   const store = await setup(t); let failDraft = true; const prompts = [];
   const { server, mesh } = createApp({ directory: store.directory, addresses: [], detect: async () => ({ codex: { installed: true, signedIn: true }, claude: { installed: true, signedIn: true } }),
     documentRunner: async () => ({ code: 0, stdout: 'Penalty is 2 percent per week', stderr: '' }),
@@ -728,8 +728,11 @@ test('documents are staged, claimed by a meeting, read by every member, and remo
   failDraft = false; prompts.length = 0;
   assert.equal((await fetch(`${base}/api/runs/${run.id}/resume`, { method: 'POST', headers, body: '{}' })).status, 200); await finished(mesh, run);
   assert.equal(run.status, 'complete'); assert.ok(prompts.every(call => /Penalty is 2 percent per week/.test(call.prompt)));
-  for (let i = 0; i < 100 && run.documents?.state !== 'removed'; i++) await delay(10);
+  // Completion keeps the text too, so the meeting can be reconvened; the owner's remove button or history eviction deletes it.
+  assert.equal(run.documents.state, 'text-kept'); assert.ok(existsSync(join(folder, 'text.txt'))); assert.ok(!existsSync(join(folder, 'file')));
+  assert.equal((await fetch(`${base}/api/runs/${run.id}/documents`, { method: 'DELETE', headers })).status, 200);
   assert.equal(run.documents.state, 'removed'); assert.ok(!existsSync(join(store.directory, 'attachments', run.id)));
+  assert.match((await (await fetch(`${base}/api/runs/${run.id}/reconvene`, { method: 'POST', headers, body: JSON.stringify({ text: 'Again', cycles: 1 }) })).json()).error, /cannot be reconvened/);
 });
 
 test('an owner can remove a stopped meeting’s documents, which ends resume; startup clears what earlier runs left behind', async t => {
@@ -756,3 +759,78 @@ test('an owner can remove a stopped meeting’s documents, which ends resume; st
   assert.match((await (await fetch(`${base}/api/runs/${runId}/resume`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Mesh-Token': token }, body: '{}' })).json()).error, /documents for this meeting were removed/);
   assert.ok(fresh.id);
 });
+
+
+test('the prompt states each member’s real access for the turn, and the budget, cycle, and record are per session', () => {
+  const participants = [{ id: 'c', name: 'Codex', type: 'codex-cli' }, { id: 'k', name: 'Claude Code', type: 'claude-cli' }, { id: 'a', name: 'Sol', type: 'compatible' }];
+  const base = { prompt: 'p', participants, drafterId: 'c', cycles: 1, entries: [], issues: [], dropped: [] };
+  const access = run => thread(run).split('\n\n').find(block => block.startsWith('ACCESS THIS TURN'));
+  assert.equal(access(base), 'ACCESS THIS TURN\n- Codex: no tools.\n- Claude Code: no tools.\n- Sol: no tools.\nThe drafter (Codex) writes the candidate as text at the draft step.');
+  const write = access({ ...base, workspace: { name: 'w', level: 'workspace-write', branch: 'mesh/abc', network: false } });
+  assert.match(write, /- Codex: reads files and runs commands in a read-only sandbox; cannot write files\./); assert.match(write, /- Claude Code: reads and searches files; no shell, cannot run commands or write files\./); assert.match(write, /- Sol: no tools; relies on what others quote\./);
+  assert.match(write, /Only the drafter \(Codex\) writes files, at the draft step after the floor closes, in its own checkout of branch mesh\/abc with a shell, no network/); assert.match(write, /Do not ask who holds write access/);
+  assert.match(access({ ...base, workspace: { name: 'w', level: 'read-only' } }), /Nobody writes files at this level/);
+  assert.match(access({ ...base, workspace: { name: 'w', level: 'full-access', branch: 'mesh/abc' } }), /- Codex: full access on this machine, every turn\./);
+  assert.match(access({ ...base, attachments: [{}] }), /- Sol: no tools; reads the DOCUMENTS text in this prompt\./);
+  // Session scoping: eight session-1 turns do not exhaust a one-cycle session 2.
+  const turn = (speaker, seq, session, stance = 'agree') => ({ id: `e${seq}`, seq, speaker, name: speaker, phase: 'floor', cycle: 1, session, status: 'complete', fields: { stance, concedes: [], objections: [], resolves: [], openPoints: [] } });
+  const openings = participants.map((p, i) => ({ id: `e${i}`, seq: i, speaker: p.id, name: p.name, phase: 'opening', status: 'complete', session: 1, fields: {} }));
+  const legacy = { ...base, floorStarted: true, entries: [...openings, ...participants.map((p, i) => turn(p.id, 10 + i, undefined, 'disagree'))] };
+  assert.equal(plan(legacy, activeMembers(legacy)).type, 'stop'); // untagged entries count as session 1: a one-cycle budget is spent
+  const two = { ...legacy, session: 2, entries: [...legacy.entries, { id: 'e20', seq: 20, speaker: 'owner', name: 'Owner', phase: 'floor', session: 2, reconvene: true, status: 'complete', text: 'Next' }] };
+  const next = plan(two, activeMembers(two)); assert.equal(next.type, 'turn'); assert.equal(next.addressOwner, true); assert.equal(next.cycle, 1);
+  assert.match(thread(two), /OWNER reconvened the meeting \(session 2\)/);
+  const after = { ...two, entries: [...two.entries, turn('c', 21, 2), turn('k', 22, 2)] }; assert.equal(plan(after, activeMembers(after)).type, 'turn'); // session 2 has one turn left in its cycle
+  assert.equal(metrics(after).floorTurns, 2);
+});
+
+test('a closed meeting can be reconvened: same record, fresh budget, the branch carries on, and revisions loop until the ballots agree', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mesh-again-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const project = await repo(join(root, 'project'));
+  const store = await setup(t); const seen = []; let objectUntil = 2;
+  const { server, mesh } = createApp({ directory: store.directory, addresses: [], workspaceRoot: root, canary: okCanary, checkRunner: plainChecks, measure: async () => ({ available: false, detail: 'stub' }),
+    detect: async () => ({ codex: { installed: true, signedIn: true }, claude: { installed: true, signedIn: true } }),
+    providerCall: async (p, r) => {
+      const phase = phaseOf(r.prompt); seen.push({ name: p.name, phase, cwd: r.cwd, prompt: r.prompt });
+      if (phase === 'draft') { const version = Number(r.prompt.match(/leave behind as candidate v(\d+)/)[1]); await writeFile(join(r.cwd, `step-${version}.txt`), `written for v${version}\n`); return { text: draft(`Implemented step ${version}.`) }; }
+      if (phase === 'ratify') { const version = Number(r.prompt.match(/BALLOT on candidate v(\d+)/)[1]); return { text: ballot(version < objectUntil ? 'object' : 'approve', version < objectUntil ? [{ claim: 'not yet', condition: 'another pass' }] : []) }; }
+      return { text: agreeable(p, r, phase) };
+    } });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+  const base = `http://127.0.0.1:${server.address().port}`, bootstrap = await (await fetch(base + '/api/bootstrap')).json();
+  const headers = { 'Content-Type': 'application/json', 'X-Mesh-Token': bootstrap.token }, post = (path, data) => fetch(base + path, { method: 'POST', headers, body: JSON.stringify(data) });
+  const ids = bootstrap.providers.map(p => p.id);
+  assert.match((await (await post('/api/runs', { prompt: 'Build it', participantIds: ids, drafterId: ids[0], cycles: 1, revisions: 9 })).json()).error, /between 0 and 5 revisions/);
+  // Session 1: the first ballot objects, the drafter revises in the same checkout, the second ballot approves.
+  const created = await (await post('/api/runs', { prompt: 'Build it in steps', participantIds: ids, drafterId: ids[0], cycles: 1, revisions: 3, workspace: { path: project, level: 'workspace-write', implementTimeout: 7200 } })).json();
+  assert.equal(created.maxRevisions, 3, JSON.stringify(created));
+  const run = mesh.runs.find(r => r.id === created.id); await finished(mesh, run);
+  assert.equal(run.status, 'complete'); assert.equal(run.revisions, 1); assert.equal(run.candidateVersion, 2); assert.equal(run.workspace.implementTimeout, 7200);
+  const drafts = seen.filter(s => s.phase === 'draft'); assert.equal(drafts.length, 2); assert.equal(drafts[0].cwd, drafts[1].cwd); // the implementer keeps its worktree across revisions
+  assert.match(drafts[1].prompt, /This is revision v2/);
+  const candidate1 = latestCandidateOf(run); assert.deepEqual(candidate1.files.map(f => f.path || f).sort(), ['step-1.txt', 'step-2.txt']);
+  assert.ok(seen.every(s => !/ACCESS THIS TURN/.test(s.prompt) || /Only the drafter \(Codex\) writes files/.test(s.prompt)));
+  // Reconvene is refused while running, and for a demo; apply session 1, then reconvene with a new instruction.
+  assert.equal((await (await post(`/api/runs/${run.id}/apply`, {})).json()).into, 'main');
+  const turnsBefore = run.entries.filter(e => e.phase === 'floor').length;
+  assert.match((await (await post(`/api/runs/${run.id}/reconvene`, { text: '', cycles: 1 })).json()).error, /what to take up next/);
+  const again = await (await post(`/api/runs/${run.id}/reconvene`, { text: 'Now add the third step.', cycles: 1 })).json();
+  assert.equal(again.session, 2); assert.equal(again.status, 'running'); assert.equal(again.sessions.length, 1); assert.equal(again.sessions[0].stopReason, 'consensus'); assert.ok(again.sessions[0].applied); assert.equal(again.workspace.applied, null);
+  const opener = again.entries.find(e => e.reconvene); assert.deepEqual({ session: opener.session, text: opener.text, speaker: opener.speaker }, { session: 2, text: 'Now add the third step.', speaker: 'owner' });
+  await finished(mesh, run);
+  assert.equal(run.status, 'complete'); assert.equal(run.session, 2); assert.equal(run.candidateVersion, 3);
+  const turnsAfter = run.entries.filter(e => e.phase === 'floor' && e.speaker !== 'owner').length; assert.equal(turnsAfter - turnsBefore, 2); // one cycle of two members, a fresh budget
+  assert.ok(seen.some(s => /OWNER reconvened the meeting \(session 2\)/.test(s.prompt) && /Now add the third step/.test(s.prompt)));
+  // Session 2's candidate is the delta from what was applied, and applying it lands only the new file.
+  const candidate2 = latestCandidateOf(run); assert.deepEqual(candidate2.files.map(f => f.path || f), ['step-3.txt']); assert.notEqual(candidate2.hash, candidate1.hash);
+  assert.equal((await (await post(`/api/runs/${run.id}/apply`, {})).json()).into, 'main');
+  for (const f of ['step-1.txt', 'step-2.txt', 'step-3.txt']) assert.ok(existsSync(join(project, f)), f);
+  assert.match(exportMarkdown(run), /## Final answer \(session 2\)/); assert.match(exportMarkdown(run), /## Session 1 result/);
+  // A discarded branch is recreated on the next session.
+  const third = await (await post(`/api/runs/${run.id}/reconvene`, { text: 'One more.', cycles: 1 })).json(); assert.equal(third.session, 3); await finished(mesh, run);
+  assert.equal(run.status, 'complete'); assert.ok((await (await post(`/api/runs/${run.id}/discard`, {})).json()).discarded);
+  const fourth = await (await post(`/api/runs/${run.id}/reconvene`, { text: 'After the discard.', cycles: 1 })).json(); assert.equal(fourth.workspace.branch, null); await finished(mesh, run);
+  assert.equal(run.status, 'complete', run.error); assert.equal(run.workspace.branch, `mesh/${run.id.slice(0, 8)}`); assert.deepEqual(latestCandidateOf(run).files.map(f => f.path || f), ['step-5.txt']);
+});
+const latestCandidateOf = run => [...run.entries].reverse().find(e => e.phase === 'draft' && e.status === 'complete' && e.candidate).candidate;

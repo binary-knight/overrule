@@ -356,3 +356,10 @@ dialog label{margin:12px 0 0}
 .attach-warning{margin:4px 0 0;font-size:13px;color:var(--warn-text);line-height:1.45}
 .attach-note{margin:8px 24px 0;font-size:13px;color:var(--muted);line-height:1.5}
 @media(max-width:640px){.attach-main{flex-wrap:wrap}.attach-meta{white-space:normal}}
+.inline-label{display:flex;flex-direction:row;align-items:center;gap:8px;font-size:14px;font-weight:600;color:var(--text)}
+.inline-label select{width:auto}
+.earlier-sessions{margin-top:20px;border-top:1px solid var(--line);padding-top:12px}
+.earlier-sessions summary{cursor:pointer;font-size:14px;color:var(--muted)}
+.earlier-sessions section{margin-top:12px;padding:12px 14px;border:1px solid var(--line);border-radius:6px;background:var(--tint)}
+.earlier-sessions h4{margin:0 0 8px;font-size:14px}
+.msg.owner.reconvene{border-style:dashed}

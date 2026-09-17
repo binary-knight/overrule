@@ -28,8 +28,8 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
   // Documents: a meeting that the last shutdown interrupted keeps only its extracted text; folders of finished or forgotten meetings go.
   const documentsReady = (async () => {
     const holding = mesh.runs.filter(r => r.attachments?.length && r.documents?.state !== 'removed');
-    for (const run of holding) await mesh.releaseDocuments(run, { keepText: run.status !== 'complete' });
-    await attachments.sweep(holding.filter(r => r.status !== 'complete').map(r => r.id));
+    for (const run of holding) await mesh.releaseDocuments(run, { keepText: true });
+    await attachments.sweep(holding.map(r => r.id));
   })().catch(error => console.error(`Document cleanup failed: ${error.message}`));
   const csrf = randomBytes(32).toString('hex');
   let cliStatus = detect(), probedAt = Date.now();
@@ -80,7 +80,7 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
     const checks = Array.isArray(input.checks) ? input.checks.map(c => String(c).trim()).filter(Boolean).slice(0, 10) : [];
     if (checks.some(c => c.length > 300)) throw new Error('Keep each check command under 300 characters.');
     const implementTimeout = Number(input.implementTimeout ?? 900);
-    if (!Number.isInteger(implementTimeout) || implementTimeout < 60 || implementTimeout > 3600) throw new Error('Use an implementer time limit between 60 and 3,600 seconds.');
+    if (!Number.isInteger(implementTimeout) || implementTimeout < 60 || implementTimeout > 14400) throw new Error('Use an implementer time limit between 60 and 14,400 seconds (four hours).');
     if (level !== 'read-only') {
       if (!info.git) throw new Error(`${level === 'full-access' ? 'Full access' : 'Workspace-write'} needs a git repository at the workspace root, so every candidate is a commit you can apply or discard.`);
       if (info.dirty && !input.acknowledgeDirty) throw new Error(`The working tree has uncommitted changes (${info.dirtyFiles.slice(0, 3).join(', ')}${info.dirtyFiles.length > 3 ? ', …' : ''}). Commit or stash them, or acknowledge that the candidate branch starts from HEAD without them.`);
@@ -256,7 +256,7 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
         try { return json(res, 201, mesh.create(options, demo)); }
         catch (error) { if (options.attachments?.length) await attachments.unclaim(options.id, options.attachments); throw error; }
       }
-      const match = url.pathname.match(/^\/api\/runs\/([a-zA-Z0-9-]+)(?:\/(events|cancel|resume|say|export|apply|discard|patch|documents))?$/);
+      const match = url.pathname.match(/^\/api\/runs\/([a-zA-Z0-9-]+)(?:\/(events|cancel|resume|reconvene|say|export|apply|discard|patch|documents))?$/);
       if (match) {
         const run = mesh.runs.find(r => r.id === match[1]);
         if (!run) return json(res, 404, { error: 'Discussion not found.' });
@@ -270,7 +270,11 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
           if (!text || text.length > 4000) throw new Error('Say something between 1 and 4,000 characters.');
           mesh.say(run, text); return json(res, 200, { ok: true, pending: run.pendingOwner.length });
         }
-        if (req.method === 'POST' && match[2] === 'resume') {
+        if (req.method === 'POST' && (match[2] === 'resume' || match[2] === 'reconvene')) {
+          const input = match[2] === 'reconvene' ? await body(req) : {};
+          const text = String(input.text || '').trim(), cycles = Number(input.cycles ?? 2);
+          if (match[2] === 'reconvene' && (!text || text.length > 4000)) throw new Error('Tell the council what to take up next, in 1 to 4,000 characters.');
+          if (match[2] === 'reconvene' && (!Number.isInteger(cycles) || cycles < 1 || cycles > 4)) throw new Error('Choose 1–4 cycles for the new session.');
           const pool = run.demo ? demoPool() : providers;
           const participants = run.participants.map(p => pool.find(x => x.id === p.id));
           if (participants.some(p => !p)) throw new Error('A connection used by this discussion no longer exists. Start a new discussion instead.');
@@ -279,7 +283,7 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
             if (!result.ok) throw new Error(`${run.workspace.level} is refused on this machine: ${result.detail}`);
           }
           if (!run.demo) await assertReady(participants);
-          return json(res, 200, mesh.resume(run, participants));
+          return json(res, 200, match[2] === 'reconvene' ? await mesh.reconvene(run, participants, { text, cycles }) : mesh.resume(run, participants));
         }
         if (req.method === 'POST' && (match[2] === 'apply' || match[2] === 'discard')) {
           return json(res, 200, match[2] === 'apply' ? await mesh.applyCandidate(run) : await mesh.discardCandidate(run));

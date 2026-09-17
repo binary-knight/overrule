@@ -253,7 +253,7 @@ const who = (run, id) => id === 'owner' ? 'You' : run.participants.find(p => p.i
 const elapsed = e => e.startedAt ? `${Math.max(0, Math.round((new Date(e.finishedAt || Date.now()) - new Date(e.startedAt)) / 1000))}s` : '';
 function entryTag(run, e) {
   if (e.phase === 'opening') return 'Opening position';
-  if (e.phase === 'floor') return e.speaker === 'owner' ? 'You' : `Floor, cycle ${e.cycle}`;
+  if (e.phase === 'floor') return e.speaker === 'owner' ? (e.reconvene ? `You reconvened the council, session ${e.session || 1}` : 'You') : `Floor, cycle ${e.cycle}${(run.sessions?.length || (e.session || 1) > 1) ? `, session ${e.session || 1}` : ''}`;
   if (e.phase === 'draft') return `Candidate v${e.candidateVersion}`;
   if (e.phase === 'ratify') return `Ballot on v${e.candidateVersion}`;
   return e.phase === 'propose' ? 'Independent proposal' : e.phase === 'review' ? `Review, round ${e.round}` : 'Final synthesis';
@@ -284,7 +284,7 @@ function renderEntry(run, e) {
     extras += `<div class="candidate"><div><b>Candidate commit ${escapeHTML(c.hash.slice(0, 12))}</b> on ${escapeHTML(c.branch)}${c.changed ? '' : ' <span class="warn">(no file changes)</span>'}${c.artifact ? `. <a href="/api/runs/${run.id}/patch">Download patch</a>` : ''}</div>${c.files.length ? `<ul class="files">${c.files.map(fi => `<li><code>${escapeHTML(fi.status)}</code> ${escapeHTML(fi.path)}</li>`).join('')}</ul>` : ''}${c.patch ? `<details><summary>Patch (${c.bytes.toLocaleString()} bytes)</summary><pre>${escapeHTML(c.patch)}</pre></details>` : ''}${c.checks.length ? c.checks.map(k => `<details${k.code === 0 ? '' : ' open'}><summary>$ ${escapeHTML(k.command)} → ${k.code === 0 ? 'passed' : k.code === null ? 'could not run' : `exit ${k.code}`} (${k.seconds}s)</summary><pre>${escapeHTML(k.output)}</pre></details>`).join('') : '<div class="warn">No checks configured; ballots on this candidate are opinions.</div>'}</div>`;
   }
   if (e.actions?.length) extras += `<details class="activity"><summary>Activity: ${e.actions.length} tool event${e.actions.length === 1 ? '' : 's'}</summary><ul>${e.actions.map(a => `<li><code>${escapeHTML(a.type)}</code> ${a.command ? escapeHTML(a.command) : ''}${a.exitCode !== undefined && a.exitCode !== null ? ` → exit ${a.exitCode}` : ''}${a.paths?.length ? `, ${a.paths.map(escapeHTML).join(', ')}` : ''}</li>`).join('')}</ul></details>`;
-  return `<article class="card msg ${e.speaker === 'owner' ? 'owner' : ''} ${e.status} ${e.superseded ? 'superseded' : ''}" data-entry="${e.id}"><header><span class="entry-status ${e.status}">${icon}</span><strong>${escapeHTML(who(run, e.speaker))}</strong><span>${entryTag(run, e)}${e.addressedOwner ? ', answering you' : ''}</span>${chips.join('')}<small>${escapeHTML(e.id)}, ${e.status === 'running' ? 'speaking' : e.status}, ${elapsed(e)}</small></header><div class="msg-body">${e.text ? markdown(e.text) : `<p>${escapeHTML(e.error || 'Speaking…')}</p>`}${meta.map(m => `<p class="entry-meta">${m}</p>`).join('')}${extras}</div></article>`;
+  return `<article class="card msg ${e.speaker === 'owner' ? 'owner' : ''} ${e.reconvene ? 'reconvene' : ''} ${e.status} ${e.superseded ? 'superseded' : ''}" data-entry="${e.id}"><header><span class="entry-status ${e.status}">${icon}</span><strong>${escapeHTML(who(run, e.speaker))}</strong><span>${entryTag(run, e)}${e.addressedOwner ? ', answering you' : ''}</span>${chips.join('')}<small>${escapeHTML(e.id)}, ${e.status === 'running' ? 'speaking' : e.status}, ${elapsed(e)}</small></header><div class="msg-body">${e.text ? markdown(e.text) : `<p>${escapeHTML(e.error || 'Speaking…')}</p>`}${meta.map(m => `<p class="entry-meta">${m}</p>`).join('')}${extras}</div></article>`;
 }
 function renderRun(run) {
   currentRun = run;
@@ -304,9 +304,9 @@ function renderRun(run) {
   const docs = run.attachments || [], docState = run.documents?.state;
   $('run-documents').classList.toggle('hidden', !docs.length);
   if (docs.length) {
-    const where = docState === 'removed' ? 'Removed from the host.' : docState === 'text-kept' ? 'The files are removed; their extracted text is kept on the host so this meeting can be resumed.' : 'On the host until the meeting closes.';
+    const where = docState === 'removed' ? 'Removed from the host.' : docState === 'text-kept' ? 'The files are removed; their extracted text is kept on the host so this meeting can be resumed or reconvened.' : 'On the host until the meeting closes.';
     $('run-documents').innerHTML = `Documents: ${docs.map(a => `${escapeHTML(a.name)} (${a.chars ? a.chars.toLocaleString() + ' characters' : 'no text read'})`).join(', ')}. ${where}${docState === 'text-kept' && run.status !== 'running' ? ' <button type="button" class="text-button" id="remove-documents">Remove the text now</button>' : ''}`;
-    const remove = $('remove-documents'); if (remove) remove.onclick = async () => { try { await api(`/api/runs/${run.id}/documents`, 'DELETE'); watchRun(await api(`/api/runs/${run.id}`)); toast('Removed. This meeting can no longer be resumed.'); } catch (error) { toast(error.message); } };
+    const remove = $('remove-documents'); if (remove) remove.onclick = async () => { try { await api(`/api/runs/${run.id}/documents`, 'DELETE'); watchRun(await api(`/api/runs/${run.id}`)); toast('Removed. This meeting can no longer be resumed or reconvened.'); } catch (error) { toast(error.message); } };
   }
   $('run-workspace').classList.toggle('hidden', !ws);
   $('run-workspace').classList.toggle('start-blocker', ws?.level === 'full-access');
@@ -324,7 +324,8 @@ function renderRun(run) {
   const done = run.entries.filter(e => e.status === 'complete').length;
   $('usage').textContent = meeting ? `${done} of up to ${run.plannedCalls} calls${tokens ? `, ${tokens.toLocaleString()} tokens` : ''}` : `${done} of ${run.plannedCalls} calls${tokens ? `, ${tokens.toLocaleString()} tokens` : ''}`;
   const metricsLine = run.record ? `<p class="record-line">${run.record.metrics.floorTurns} floor turns, ${run.record.metrics.stanceChanges} stance changes, ${run.record.metrics.citedConcessions} cited concessions, ${run.record.metrics.objectionsResolved} of ${run.record.metrics.objectionsRaised} objections resolved${run.record.metrics.ownerInterjections ? `, you spoke ${run.record.metrics.ownerInterjections} time${run.record.metrics.ownerInterjections === 1 ? '' : 's'}` : ''}.</p>` : '';
-  $('answer').innerHTML = run.final ? metricsLine + markdown(run.final) : `<div class="answer-waiting"><span class="${run.status === 'running' ? 'thinking-symbol' : ''}">◈</span><h3>${run.status === 'running' ? (meeting ? 'The meeting is in session.' : 'Good answers are worth a conversation.') : 'The thread is saved.'}</h3><p>${run.status === 'running' ? `Open the ${meeting ? 'Meeting' : 'Discussion'} tab to follow each contribution as it arrives${meeting ? ', or speak to the council below' : ''}.` : 'Review the transcript for completed contributions and connection errors.'}</p></div>`;
+  const earlier = (run.sessions || []).length ? `<details class="earlier-sessions"><summary>Earlier sessions (${run.sessions.length})</summary>${run.sessions.map(s => `<section><h4>Session ${s.session}${s.stopReason ? `, closed by ${s.stopReason}` : s.status ? `, ${s.status}` : ''}</h4>${s.final ? markdown(s.final) : '<p>No final answer.</p>'}</section>`).join('')}</details>` : '';
+  $('answer').innerHTML = run.final ? metricsLine + markdown(run.final) + earlier : `<div class="answer-waiting"><span class="${run.status === 'running' ? 'thinking-symbol' : ''}">◈</span><h3>${run.status === 'running' ? (meeting ? 'The meeting is in session.' : 'Good answers are worth a conversation.') : 'The thread is saved.'}</h3><p>${run.status === 'running' ? `Open the ${meeting ? 'Meeting' : 'Discussion'} tab to follow each contribution as it arrives${meeting ? ', or speak to the council below' : ''}.` : 'Review the transcript for completed contributions and connection errors.'}</p></div>`;
   if (meeting) $('transcript').innerHTML = run.entries.map(e => renderEntry(run, e)).join('');
   else {
     const openEntries = new Set([...$('transcript').querySelectorAll('details[open]')].map(el => el.dataset.entry));
@@ -334,6 +335,7 @@ function renderRun(run) {
   $('issues').classList.toggle('hidden', !meeting || !issues.length || $('transcript').classList.contains('hidden'));
   $('issues').innerHTML = `<h3>Objections</h3>` + issues.map(i => `<div class="issue"><b>${escapeHTML(i.id)}</b><span>${escapeHTML(who(run, i.raisedBy))} → ${escapeHTML(who(run, i.against))}: “${escapeHTML(i.claim)}”<br>Resolves when ${escapeHTML(i.condition)}</span><span class="chip ${i.status === 'resolved' ? 'vote-approve' : 'vote-object'}">${i.status}</span></div>`).join('');
   $('say-form').classList.toggle('hidden', !meeting || run.status !== 'running');
+  $('reconvene-form').classList.toggle('hidden', !meeting || run.demo || run.status === 'running' || !run.floorStarted); $('reconvene-form').querySelector('button').disabled = false;
   $('say-note').textContent = run.pendingOwner?.length ? `${run.pendingOwner.length} message${run.pendingOwner.length === 1 ? '' : 's'} queued for the next turn.` : 'Delivered at the next turn. The next member must address you.';
   updateEstimate();
 }
@@ -358,7 +360,7 @@ async function startRun(demo = false) {
   if (!demo && (state.attachments || []).some(a => a.uploading)) return toast('Wait for the documents to finish uploading.');
   $('start').disabled = true; $('demo').disabled = true;
   try {
-    const run = await api('/api/runs', 'POST', { prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), demo, workspace: demo ? undefined : workspacePayload(), attachmentIds: demo ? undefined : (state.attachments || []).filter(a => a.id).map(a => a.id) });
+    const run = await api('/api/runs', 'POST', { prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), revisions: Number($('revisions')?.value ?? 1), demo, workspace: demo ? undefined : workspacePayload(), attachmentIds: demo ? undefined : (state.attachments || []).filter(a => a.id).map(a => a.id) });
     if (!demo && run.attachments?.length) { state.attachments = []; renderAttachments(); }
     showPage('workspace'); watchRun(run); await refreshHistory(); $('discussion').scrollIntoView({ behavior: 'smooth', block: 'start' });
     if (!demo && run.workspace) api('/api/workspace').then(config => { state.workspaceConfig = config; workspaceSetup(); }).catch(() => {}); // the workspace just became a recent
@@ -496,6 +498,12 @@ $('copy-lan-code').onclick = async () => { try { await navigator.clipboard.write
 $('prompt').oninput = () => { $('char-count').textContent = `${$('prompt').value.length.toLocaleString()} / 24,000`; saveDraft(); };
 $('rounds').onchange = () => { updateEstimate(); saveDraft(); };
 $('synthesizer').onchange = $('max-tokens').onchange = $('timeout').onchange = saveDraft;
+$('reconvene-form').addEventListener('submit', async event => {
+  event.preventDefault(); const text = $('reconvene-text').value.trim(); if (!text || !currentRun) return;
+  const button = event.submitter; button.disabled = true;
+  try { const run = await api(`/api/runs/${currentRun.id}/reconvene`, 'POST', { text, cycles: Number($('reconvene-cycles').value) }); $('reconvene-text').value = ''; watchRun(run); renderHistory(); toast(`Session ${run.session} is open. The next member will address you.`); }
+  catch (error) { toast(error.message); button.disabled = false; }
+});
 $('say-form').addEventListener('submit', async event => {
   event.preventDefault(); const text = $('say-text').value.trim(); if (!text || !currentRun) return;
   const button = event.submitter; button.disabled = true;
