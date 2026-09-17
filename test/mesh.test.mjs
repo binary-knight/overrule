@@ -330,7 +330,7 @@ test('the scripted demo ignores a draft prompt and stale mutation tokens are ide
 // ---------- workspaces ----------
 import { mkdir, writeFile, symlink, chmod, readFile as readFileP } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { validateWorkspacePath, validateRoot, browse, scanSecrets, git, inspect as inspectWorkspace, measureLevel } from '../lib/workspace.mjs';
+import { validateWorkspacePath, scanSecrets, git, inspect as inspectWorkspace, measureLevel } from '../lib/workspace.mjs';
 import { runProcess, childEnv } from '../lib/providers.mjs';
 
 async function repo(dir) {
@@ -345,19 +345,18 @@ async function repo(dir) {
 const okCanary = async level => ({ level, ok: true, available: true, detail: 'stub boundary holds' });
 const plainChecks = async (commands, cwd) => { const out = []; for (const command of commands) { const r = await (await import('../lib/providers.mjs')).runProcess('bash', ['-lc', command], { cwd, capture: true, signal: AbortSignal.timeout(20000) }); out.push({ command, code: r.code, output: r.stdout + r.stderr, seconds: 0 }); } return out; };
 
-test('workspace paths are validated against the configured root, symlinks, hidden segments, and the app itself', async t => {
+test('workspace paths are validated against system folders, symlinks, hidden segments, and the app itself', async t => {
   const root = await mkdtemp(join(tmpdir(), 'mesh-root-')); t.after(() => rm(root, { recursive: true, force: true }));
   const project = join(root, 'project'); await mkdir(join(project, 'node_modules'), { recursive: true }); await mkdir(join(root, '.hidden', 'x'), { recursive: true });
   await writeFile(join(project, '.env'), 'X=1'); await writeFile(join(project, 'id_rsa'), 'k'); await writeFile(join(project, 'node_modules', '.env'), 'ignored'); await writeFile(join(project, 'app.js'), '');
   await symlink(project, join(root, 'link'));
-  const rules = { roots: [root], appRoot: '/home/jknight/model-mesh', dataDir: join(root, 'appdata') }; await mkdir(join(root, 'appdata'));
+  const rules = { appRoot: '/home/jknight/model-mesh', dataDir: join(root, 'appdata') }; await mkdir(join(root, 'appdata'));
   assert.equal(validateWorkspacePath(project, rules), project);
-  assert.throws(() => validateWorkspacePath(project, { ...rules, roots: [] }), /No allowed directories/);
-  assert.throws(() => validateRoot('/etc', rules), /System directories/); assert.throws(() => validateRoot('~', rules), /home directory itself/);
-  assert.deepEqual(browse(null, rules).entries.map(e => e.path), [root]); assert.deepEqual(browse(root, rules).entries.map(e => e.name), ['appdata', 'project']);
+  assert.throws(() => validateWorkspacePath('/etc', rules), /System directories/); assert.throws(() => validateWorkspacePath('~', rules), /home directory itself/);
+  assert.throws(() => validateWorkspacePath(root, rules), /own directory/); // a folder that contains the app's data cannot be a workspace
   assert.throws(() => validateWorkspacePath(join(root, 'link'), rules), /Symlinked/);
   const elsewhere = await mkdtemp(join(tmpdir(), 'mesh-other-')); t.after(() => rm(elsewhere, { recursive: true, force: true }));
-  assert.throws(() => validateWorkspacePath(elsewhere, rules), /must be inside/);
+  assert.equal(validateWorkspacePath(elsewhere, rules), elsewhere); // no allow list: any directory that passes the rules can be a workspace
   assert.throws(() => validateWorkspacePath(join(root, '.hidden', 'x'), rules), /Hidden/);
   assert.throws(() => validateWorkspacePath(join(root, 'appdata'), rules), /own directory/);
   assert.throws(() => validateWorkspacePath(join(root, 'missing'), rules), /does not exist/);
@@ -383,14 +382,11 @@ test('a workspace-write meeting implements in an isolated checkout, commits past
   const bootstrap = await (await fetch(base + '/api/bootstrap')).json();
   const headers = { 'Content-Type': 'application/json', 'X-Mesh-Token': bootstrap.token };
   const post = (path, data) => fetch(base + path, { method: 'POST', headers, body: JSON.stringify(data) });
-  const config = await (await fetch(base + '/api/workspace')).json(); assert.deepEqual(config.roots, [root]);
-  // Allowed directories are managed from the page and persisted.
-  const extra = join(root, 'extra'); await mkdir(extra);
-  assert.deepEqual((await (await post('/api/workspace/roots', { path: extra })).json()).roots, [root, extra]);
-  assert.match((await (await post('/api/workspace/roots', { path: '/usr' })).json()).error, /System directories/);
-  const browsed = await (await post('/api/workspace/browse', { path: root })).json(); assert.ok(browsed.entries.some(e => e.name === 'project' && e.git));
-  assert.deepEqual((await (await fetch(base + '/api/workspace/roots', { method: 'DELETE', headers, body: JSON.stringify({ path: extra }) })).json()).roots, [root]);
-  assert.deepEqual(JSON.parse(await readFileP(join(store.directory, 'workspaces.json'), 'utf8')).roots, [root]);
+  // There is no allow list. MESH_WORKSPACE_ROOT only says where Browse starts, and nothing is recent until a meeting attaches a workspace.
+  const config = await (await fetch(base + '/api/workspace')).json(); assert.deepEqual(config.recent, []); assert.equal(config.browseStart, root); assert.equal(config.roots, undefined);
+  assert.equal((await post('/api/workspace/roots', { path: root })).status, 404);
+  assert.match((await (await post('/api/workspace/inspect', { path: '/usr' })).json()).error, /System directories/);
+  const browsed = await (await post('/api/workspace/browse-host', { path: root })).json(); assert.ok(browsed.entries.some(e => e.name === 'project' && e.git && e.selectable));
   const inspected = await (await post('/api/workspace/inspect', { path: project })).json(); assert.equal(inspected.git, true); assert.equal(inspected.branch, 'main'); assert.equal(inspected.canaries['workspace-write'].ok, true);
   const ids = bootstrap.providers.map(p => p.id), codex = ids[0], claude = ids[1];
   const body = extra => ({ prompt: 'Add a greeting file', participantIds: ids, drafterId: codex, cycles: 1, workspace: { path: project, level: 'workspace-write', checks: ['cat hello.txt'], ...extra } });
@@ -409,7 +405,10 @@ test('a workspace-write meeting implements in an isolated checkout, commits past
   await mkdir(join(root, 'plain')); assert.match((await (await post('/api/runs', body({ path: join(root, 'plain') }))).json()).error, /needs a git repository/);
   await writeFile(join(project, '.env'), 'SECRET=1'); assert.match((await (await post('/api/runs', body())).json()).error, /look like secrets/); await rm(join(project, '.env'));
   // The real thing.
+  assert.deepEqual((await (await fetch(base + '/api/workspace')).json()).recent, []); // refused attachments are not remembered
   const created = await post('/api/runs', body()); const createdText = await created.text(); assert.equal(created.status, 201, createdText);
+  assert.deepEqual((await (await fetch(base + '/api/workspace')).json()).recent, [{ path: project, git: true, missing: false }]);
+  assert.deepEqual(JSON.parse(await readFileP(join(store.directory, 'workspaces.json'), 'utf8')).recent, [project]);
   const { id } = JSON.parse(createdText); const run = mesh.runs.find(r => r.id === id); await finished(mesh, run);
   assert.equal(run.status, 'complete', run.error);
   const floor = seen.filter(s => s.phase === 'turn' || s.phase === 'opening'); assert.ok(floor.length >= 3); assert.ok(floor.every(s => s.cwd === project && s.level === 'read-only'));
@@ -430,6 +429,7 @@ test('a workspace-write meeting implements in an isolated checkout, commits past
   const second = await (await post('/api/runs', { ...body(), prompt: 'Another' })).json(); const run2 = mesh.runs.find(r => r.id === second.id); await finished(mesh, run2);
   assert.equal(run2.status, 'complete', run2.error);
   const discarded = await (await post(`/api/runs/${second.id}/discard`, {})).json(); assert.ok(discarded.discarded);
+  assert.equal((await (await fetch(base + '/api/workspace')).json()).recent.length, 1); // the same workspace twice is one recent
   assert.doesNotMatch(await git(project, ['branch', '--list']), new RegExp(run2.workspace.branch));
   assert.match(await git(project, ['branch', '--list']), new RegExp(run.workspace.branch));
 });
@@ -561,15 +561,17 @@ test('the security page lists member boundaries and presets, queues measurements
 });
 
 import { browseHost } from '../lib/workspace.mjs';
-test('the host browser lists folders from the home directory and marks what can be allowed', async t => {
+test('the host browser lists folders from the home directory and marks what can be a workspace', async t => {
   const root = await mkdtemp(join(tmpdir(), 'mesh-host-')); t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'projects', 'app', '.git'), { recursive: true }); await mkdir(join(root, '.hidden')); await mkdir(join(root, 'node_modules'));
-  const rules = { roots: [], appRoot: join(root, 'projects', 'app'), dataDir: join(root, 'projects', 'app', 'data') };
+  await mkdir(join(root, 'other', 'site'), { recursive: true });
+  const rules = { appRoot: join(root, 'projects', 'app'), dataDir: join(root, 'projects', 'app', 'data') };
   const listing = browseHost(root, rules);
-  assert.deepEqual(listing.entries.map(e => [e.name, e.selectable]), [['projects', true]]);
+  // "projects" contains the app, so it can be walked through but not attached; "other" can be attached.
+  assert.deepEqual(listing.entries.map(e => [e.name, e.selectable]), [['other', true], ['projects', false]]);
   assert.equal(listing.parent, resolvePath(root, '..'));
   const inner = browseHost(join(root, 'projects'), rules);
-  assert.deepEqual(inner.entries.map(e => [e.name, e.git, e.selectable]), [['app', true, false]]); // the app's own directory cannot be allowed
+  assert.deepEqual(inner.entries.map(e => [e.name, e.git, e.selectable]), [['app', true, false]]); // the app's own directory cannot be a workspace
   assert.equal(browseHost('/etc', rules).selectable, false);
   assert.throws(() => browseHost(join(root, 'missing'), rules), /does not exist/);
   const home = browseHost('', rules); assert.equal(home.selectable, false); assert.ok(Array.isArray(home.entries));
@@ -607,4 +609,22 @@ test('the in-app installer unpacks the vendored bundle, builds a venv, verifies 
   for (let i = 0; i < 100 && (jobs.current || jobs.queue.length); i++) await delay(10);
   assert.equal(jobs.binary, '/x/agentsec'); assert.ok(events.includes('log') && events.includes('finished'));
   assert.doesNotThrow(() => jobs.enqueue({ kind: 'member', template: 'x', label: 'later' }));
+});
+
+test('allowed directories from an older data file become recent workspaces, which can be forgotten', async t => {
+  const store = await setup(t);
+  const root = await mkdtemp(join(tmpdir(), 'mesh-recent-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, 'project'); await mkdir(join(project, '.git'), { recursive: true });
+  await writeFile(join(store.directory, 'workspaces.json'), JSON.stringify({ roots: [project, join(root, 'gone')], maxScore: 40 }));
+  const { server } = createApp({ directory: store.directory, addresses: [], detect: async () => ({}) });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const token = (await (await fetch(base + '/api/bootstrap')).json()).token;
+  const config = await (await fetch(base + '/api/workspace')).json();
+  assert.deepEqual(config.recent, [{ path: project, git: true, missing: false }, { path: join(root, 'gone'), git: false, missing: true }]);
+  assert.equal(config.maxScore, 40); assert.equal(config.browseStart, '');
+  const after = await (await fetch(base + '/api/workspace/recent', { method: 'DELETE', headers: { 'Content-Type': 'application/json', 'X-Mesh-Token': token }, body: JSON.stringify({ path: join(root, 'gone') }) })).json();
+  assert.deepEqual(after.recent.map(r => r.path), [project]);
+  assert.deepEqual(JSON.parse(await readFileP(join(store.directory, 'workspaces.json'), 'utf8')), { recent: [project], maxScore: 40 });
 });

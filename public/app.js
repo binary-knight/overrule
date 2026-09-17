@@ -96,39 +96,27 @@ function archetypeSetup() {
 // ---------- workspace ----------
 const levelValue = () => document.querySelector('input[name=workspace-level]:checked')?.value || '';
 function workspaceSetup() {
-  const config = state.workspaceConfig || {}, roots = config.roots || [];
+  const config = state.workspaceConfig || {}, recent = config.recent || [];
   $('workspace-lan').classList.toggle('hidden', Boolean(config.local));
   $('workspace-budget').value = config.maxScore ?? ''; $('workspace-budget').placeholder = config.agentsec ? 'No budget' : 'Needs agentsec-pack'; $('workspace-budget').disabled = !config.agentsec; $('budget-save').disabled = !config.agentsec;
   $('agentsec-help').classList.toggle('hidden', config.agentsec !== false);
-  $('roots-empty').classList.toggle('hidden', roots.length > 0);
-  $('roots').innerHTML = roots.map(r => `<span class="root-chip"><button type="button" class="root-open" data-root="${escapeHTML(r)}" title="Browse">${escapeHTML(r)}</button><button type="button" class="root-remove" data-remove="${escapeHTML(r)}" aria-label="Stop allowing ${escapeHTML(r)}">×</button></span>`).join('');
-  $('roots').querySelectorAll('[data-root]').forEach(b => b.onclick = () => browseTo(b.dataset.root));
-  $('roots').querySelectorAll('[data-remove]').forEach(b => b.onclick = async () => { try { state.workspaceConfig = { ...config, ...(await api('/api/workspace/roots', 'DELETE', { path: b.dataset.remove })) }; workspaceSetup(); } catch (error) { toast(error.message); } });
+  $('recent-head').classList.toggle('hidden', recent.length === 0);
+  $('recent').innerHTML = recent.map(r => `<span class="recent-chip"><button type="button" class="recent-open" data-recent="${escapeHTML(r.path)}" data-git="${r.git ? 1 : ''}" title="${r.missing ? 'This folder no longer exists' : r.git ? 'Use and inspect this workspace' : 'Browse this folder'}">${escapeHTML(r.path)}</button><button type="button" class="recent-remove" data-remove="${escapeHTML(r.path)}" aria-label="Forget ${escapeHTML(r.path)}">×</button></span>`).join('');
+  // A project opens straight into Inspect; a plain folder opens the browser there, since it is more likely a folder of projects.
+  $('recent').querySelectorAll('[data-recent]').forEach(b => b.onclick = () => { $('workspace-path').value = b.dataset.recent; saveDraft(); if (b.dataset.git) { $('browser').classList.add('hidden'); $('workspace-inspect').click(); } else browseTo(b.dataset.recent); });
+  $('recent').querySelectorAll('[data-remove]').forEach(b => b.onclick = async () => { try { state.workspaceConfig = { ...config, ...(await api('/api/workspace/recent', 'DELETE', { path: b.dataset.remove })) }; workspaceSetup(); } catch (error) { toast(error.message); } });
   workspaceLevelChanged();
 }
-// Host browser for choosing a directory to allow. Folders that cannot be allowed still show, greyed, so the tree stays navigable.
-async function browseHostTo(path) {
-  try {
-    const listing = await api('/api/workspace/browse-host', 'POST', { path });
-    $('root-browser').classList.remove('hidden');
-    $('root-crumb').innerHTML = `${listing.parent ? '<button type="button" class="text-button" id="root-up">Up</button>' : ''}<span>${escapeHTML(listing.path)}</span>${listing.git ? '<span class="chip vote-approve">git</span>' : ''}${listing.selectable ? '<button type="button" class="text-button" id="root-use">Allow this folder</button>' : '<span class="chip">cannot be allowed</span>'}`;
-    if (listing.parent) $('root-up').onclick = () => browseHostTo(listing.parent);
-    if (listing.selectable) $('root-use').onclick = () => { $('root-path').value = listing.path; $('root-add').click(); $('root-browser').classList.add('hidden'); };
-    $('root-entries').innerHTML = listing.entries.length ? listing.entries.map(e => `<button type="button" class="browser-entry ${e.selectable ? '' : 'unselectable'}" data-host-path="${escapeHTML(e.path)}"><span>📁 ${escapeHTML(e.name)}</span>${e.git ? '<span class="chip vote-approve">git</span>' : e.selectable ? '' : '<span>not allowed</span>'}</button>`).join('') : '<p class="empty-copy">No subfolders.</p>';
-    $('root-entries').querySelectorAll('[data-host-path]').forEach(b => b.onclick = () => browseHostTo(b.dataset.hostPath));
-    $('root-path').value = listing.path;
-  } catch (error) { toast(error.message); }
-}
-// Folder browser over the allowed directories, so a workspace can be picked from another machine without knowing the host's paths.
+// Host browser for picking the workspace from any machine. Folders that cannot be a workspace still show, greyed, so the tree stays navigable.
 async function browseTo(path) {
   try {
-    const listing = await api('/api/workspace/browse', 'POST', { path });
+    const listing = await api('/api/workspace/browse-host', 'POST', { path });
     $('browser').classList.remove('hidden');
-    $('browser-crumb').innerHTML = `<span>${escapeHTML(listing.path)}</span>${listing.git ? '<span class="chip vote-approve">git</span>' : ''}<button type="button" class="text-button" id="browser-use">Use this folder</button>`;
-    $('browser-use').onclick = () => { $('workspace-path').value = listing.path; saveDraft(); $('workspace-inspect').click(); };
-    $('browser-entries').innerHTML = listing.entries.length ? listing.entries.map(e => `<button type="button" class="browser-entry" data-path="${escapeHTML(e.path)}"><span>📁 ${escapeHTML(e.name)}</span>${e.git ? '<span class="chip vote-approve">git</span>' : ''}</button>`).join('') : '<p class="empty-copy">No subfolders.</p>';
+    $('browser-crumb').innerHTML = `${listing.parent ? '<button type="button" class="text-button" id="browser-up">Up</button>' : ''}<span>${escapeHTML(listing.path)}</span>${listing.git ? '<span class="chip vote-approve">git</span>' : ''}${listing.selectable ? '<button type="button" class="text-button" id="browser-use">Use this folder</button>' : '<span class="chip">cannot be a workspace</span>'}`;
+    if (listing.parent) $('browser-up').onclick = () => browseTo(listing.parent);
+    if (listing.selectable) $('browser-use').onclick = () => { $('workspace-path').value = listing.path; saveDraft(); $('browser').classList.add('hidden'); $('workspace-inspect').click(); };
+    $('browser-entries').innerHTML = listing.entries.length ? listing.entries.map(e => `<button type="button" class="browser-entry ${e.selectable ? '' : 'unselectable'}" data-path="${escapeHTML(e.path)}"><span>📁 ${escapeHTML(e.name)}</span>${e.git ? '<span class="chip vote-approve">git</span>' : e.selectable ? '' : '<span>browse only</span>'}</button>`).join('') : '<p class="empty-copy">No subfolders.</p>';
     $('browser-entries').querySelectorAll('[data-path]').forEach(b => b.onclick = () => browseTo(b.dataset.path));
-    $('workspace-path').value = listing.path; saveDraft();
   } catch (error) { toast(error.message); }
 }
 function workspaceLevelChanged() {
@@ -310,6 +298,7 @@ async function startRun(demo = false) {
   try {
     const run = await api('/api/runs', 'POST', { prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), demo, workspace: demo ? undefined : workspacePayload() });
     showPage('workspace'); watchRun(run); await refreshHistory(); $('discussion').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!demo && run.workspace) api('/api/workspace').then(config => { state.workspaceConfig = config; workspaceSetup(); }).catch(() => {}); // the workspace just became a recent
   } catch (error) { toast(error.message); } finally { $('demo').disabled = false; updateEstimate(); }
 }
 function newDiscussion() {
@@ -450,12 +439,7 @@ $('say-form').addEventListener('submit', async event => {
   try { await api(`/api/runs/${currentRun.id}/say`, 'POST', { text }); $('say-text').value = ''; toast('Delivered. The next member will address you.'); }
   catch (error) { toast(error.message); } finally { button.disabled = false; }
 });
-$('root-browse').onclick = () => { if (!$('root-browser').classList.contains('hidden')) return $('root-browser').classList.add('hidden'); browseHostTo($('root-path').value.trim()); };
-$('root-add').onclick = async () => {
-  $('root-add').disabled = true;
-  try { state.workspaceConfig = { ...(state.workspaceConfig || {}), ...(await api('/api/workspace/roots', 'POST', { path: $('root-path').value.trim() })) }; $('root-path').value = ''; workspaceSetup(); toast('Directory allowed. Pick a project inside it.'); }
-  catch (error) { toast(error.message); } finally { $('root-add').disabled = false; }
-};
+$('workspace-browse').onclick = () => { if (!$('browser').classList.contains('hidden')) return $('browser').classList.add('hidden'); browseTo($('workspace-path').value.trim() || state.workspaceConfig?.browseStart || ''); };
 $('budget-save').onclick = async () => { try { const { maxScore } = await api('/api/workspace/budget', 'POST', { maxScore: $('workspace-budget').value.trim() === '' ? null : Number($('workspace-budget').value) }); state.workspaceConfig = { ...(state.workspaceConfig || {}), maxScore }; toast(maxScore === null ? 'Budget cleared.' : `Levels scoring above ${maxScore} will be refused.`); } catch (error) { toast(error.message); } };
 $('workspace-inspect').onclick = async () => {
   $('workspace-inspect').disabled = true;

@@ -1,12 +1,13 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Store } from './lib/store.mjs';
 import { TYPES, PRESETS, validateProvider, publicProvider, detectClis, cliKey } from './lib/providers.mjs';
 import { Mesh, validateRun, exportMarkdown, DEMO_PROMPT, latestCandidate } from './lib/mesh.mjs';
-import { validateWorkspacePath, validateRoot, browse as browseWorkspace, browseHost, inspect as inspectWorkspace, codexCanary, measureLevel, agentsecBinary, LEVELS } from './lib/workspace.mjs';
+import { validateWorkspacePath, browseHost, inspect as inspectWorkspace, codexCanary, measureLevel, agentsecBinary, LEVELS } from './lib/workspace.mjs';
 import { SecurityJobs, listPresets, memberProfiles, validateImage, vendoredAgentsec } from './lib/security.mjs';
 import { Access } from './lib/access.mjs';
 
@@ -46,18 +47,20 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
       if (clis[key].signedIn === false) throw new Error(`${p.name} is not signed in. Run ${key === 'codex' ? 'codex login' : 'claude auth login'} in your terminal, then use Check in Connections.`);
     }
   }
-  // Allowed directories live in the app, managed from the page; MESH_WORKSPACE_ROOT only seeds the list.
-  const workspaceSettings = store.read('workspaces.json', { roots: [] });
-  let roots = workspaceSettings.roots || [];
+  // Recent workspaces are shortcuts, not permissions: any directory that passes validateWorkspacePath can be attached. An older
+  // data file's allowed directories ("roots") become the first recents; MESH_WORKSPACE_ROOT only sets where Browse starts.
+  const workspaceSettings = store.read('workspaces.json', {});
+  let recent = (Array.isArray(workspaceSettings.recent) ? workspaceSettings.recent : workspaceSettings.roots || []).filter(p => typeof p === 'string').slice(0, 20);
   // An optional blast-radius budget: a level whose measured score exceeds it is refused. Blank means show the number and let the owner decide.
   let maxScore = Number.isInteger(workspaceSettings.maxScore) ? workspaceSettings.maxScore : null;
-  const saveWorkspaceSettings = () => store.write('workspaces.json', { roots, maxScore });
-  if (workspaceRoot) { try { const seeded = validateRoot(workspaceRoot, { appRoot: root, dataDir: directory }); if (!roots.includes(seeded)) { roots.push(seeded); saveWorkspaceSettings(); } } catch (error) { console.error(`MESH_WORKSPACE_ROOT ignored: ${error.message}`); } }
-  const workspaceRules = { get roots() { return roots; }, appRoot: root, dataDir: directory };
+  const saveWorkspaceSettings = () => store.write('workspaces.json', { recent, maxScore });
+  const rememberWorkspace = path => { recent = [path, ...recent.filter(p => p !== path)].slice(0, 20); saveWorkspaceSettings(); };
+  const recentList = () => recent.map(path => ({ path, git: existsSync(join(path, '.git')), missing: !existsSync(path) }));
+  const workspaceRules = { appRoot: root, dataDir: directory };
   const security = securityJobs || new SecurityJobs(directory, { vendorDir: join(root, 'vendor') });
-  // A workspace is attached only from the host machine, only under the configured root, and only at a level whose canary holds here.
+  // A workspace is any host directory that passes the path rules, attached only at a level whose canary holds here.
   // Paired devices may attach workspaces: the owner runs this server headless and works from other machines. The pairing code is
-  // therefore the key to sandboxed code execution under the workspace root; where a workspace was attached from is recorded.
+  // therefore the key to code execution on the host at the chosen level; where a workspace was attached from is recorded.
   async function parseWorkspace(input, options, from) {
     if (!input || typeof input !== 'object' || !input.path) return null;
     const path = validateWorkspacePath(input.path, workspaceRules);
@@ -132,25 +135,18 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
       }
       if (req.method === 'GET' && url.pathname === '/api/bootstrap') return json(res, 200, { token: csrf, providers: providers.map(publicProvider), types: TYPES, presets: PRESETS, clis: await currentClis(), runs: summaries(mesh.runs), local, lanUrls: access.urls(port) });
       if (req.method === 'POST' && url.pathname === '/api/clis/check') return json(res, 200, await refreshClis());
-      if (req.method === 'GET' && url.pathname === '/api/workspace') return json(res, 200, { roots, local, levels: LEVELS, maxScore, agentsec: Boolean(security.binary || agentsecBinary()) });
+      if (req.method === 'GET' && url.pathname === '/api/workspace') return json(res, 200, { recent: recentList(), browseStart: workspaceRoot || '', local, levels: LEVELS, maxScore, agentsec: Boolean(security.binary || agentsecBinary()) });
       if (req.method === 'POST' && url.pathname === '/api/workspace/budget') {
         const value = (await body(req)).maxScore;
         maxScore = value === null || value === '' ? null : Number(value);
         if (maxScore !== null && (!Number.isInteger(maxScore) || maxScore < 0 || maxScore > 100)) throw new Error('The budget is a whole number from 0 to 100, or blank for none.');
         saveWorkspaceSettings(); return json(res, 200, { maxScore });
       }
-      if (req.method === 'POST' && url.pathname === '/api/workspace/roots') {
-        const added = validateRoot((await body(req)).path, workspaceRules);
-        if (roots.length >= 20) throw new Error('You can allow up to 20 directories.');
-        if (!roots.includes(added)) { roots = [...roots, added]; saveWorkspaceSettings(); }
-        return json(res, 200, { roots });
-      }
-      if (req.method === 'DELETE' && url.pathname === '/api/workspace/roots') {
+      if (req.method === 'DELETE' && url.pathname === '/api/workspace/recent') {
         const removed = String((await body(req)).path || '');
-        roots = roots.filter(r => r !== removed); saveWorkspaceSettings();
-        return json(res, 200, { roots });
+        recent = recent.filter(p => p !== removed); saveWorkspaceSettings();
+        return json(res, 200, { recent: recentList() });
       }
-      if (req.method === 'POST' && url.pathname === '/api/workspace/browse') return json(res, 200, browseWorkspace((await body(req)).path, workspaceRules));
       if (req.method === 'POST' && url.pathname === '/api/workspace/browse-host') return json(res, 200, browseHost((await body(req)).path, workspaceRules));
       // ---- Security page: member boundaries and the sandbox lab. Presets and member profiles only; no launcher comes from a browser. ----
       if (req.method === 'GET' && url.pathname === '/api/security') {
@@ -235,6 +231,7 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
         const options = validateRun(input, pool);
         options.workspace = demo ? null : await parseWorkspace(input.workspace, options, local ? 'localhost' : String(req.socket.remoteAddress || 'lan'));
         if (!demo) await assertReady(options.participants);
+        if (options.workspace) rememberWorkspace(options.workspace.path);
         return json(res, 201, mesh.create(options, demo));
       }
       const match = url.pathname.match(/^\/api\/runs\/([a-zA-Z0-9-]+)(?:\/(events|cancel|resume|say|export|apply|discard|patch))?$/);
