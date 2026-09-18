@@ -1,3 +1,5 @@
+import { assessResult, callsUsed, elapsedBudget, estimateCalls, citationEvidence } from './meeting-state.js';
+
 const $ = id => document.getElementById(id);
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 let state = { providers: [], selected: new Set(), runs: [], clis: {}, types: {} }, currentRun, events, editingId, toastTimer;
@@ -6,7 +8,7 @@ const colors = { 'codex-cli': 'mint', 'claude-cli': 'peach', openai: 'mint', ant
 function toast(message) { $('toast').textContent = message; $('toast').classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').classList.add('hidden'), 6000); }
 // The draft lives in this browser only, so an expired pairing or a server restart never costs a half-written brief.
 const DRAFT_KEY = 'mesh-draft';
-function saveDraft() { try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ prompt: $('prompt').value, rounds: $('rounds').value, synthesizer: $('synthesizer').value, selected: [...state.selected], maxTokens: $('max-tokens').value, timeout: $('timeout').value, workspacePath: $('workspace-path').value, workspaceChecks: $('workspace-checks').value })); } catch {} }
+function saveDraft() { try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ prompt: $('prompt').value, rounds: $('rounds').value, revisions: $('revisions').value, maxCalls: $('max-calls').value, duration: $('duration').value, synthesizer: $('synthesizer').value, selected: [...state.selected], maxTokens: $('max-tokens').value, timeout: $('timeout').value, workspacePath: $('workspace-path').value, workspaceChecks: $('workspace-checks').value })); } catch {} }
 function readDraft() { try { return JSON.parse(localStorage.getItem(DRAFT_KEY)) || {}; } catch { return {}; } }
 async function api(path, method = 'GET', data, retried = false) {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', 'X-Mesh-Token': state.token || '' }, ...(data !== undefined ? { body: JSON.stringify(data) } : {}) });
@@ -70,9 +72,10 @@ function documentNote() {
 }
 function updateEstimate() {
   const n = state.selected.size, cycles = Number($('rounds').value);
-  // Upper bound, matching the server: openings, turns, draft, ballots, one revision with its ballots, one re-ask per member.
-  const typical = n + n * cycles + 1 + (n - 1), maximum = typical + 1 + (n - 1) + n;
-  $('call-estimate').textContent = n ? `About ${typical} calls, up to ${maximum}${cycles === 1 && n >= 4 ? `. With ${n} members, one cycle means each speaks once and nobody replies` : ''}${documentNote()}` : 'Select your members';
+  const { typical, maximum } = estimateCalls(n, cycles, Number($('revisions').value));
+  $('max-calls').placeholder = `Automatic (${maximum})`;
+  const limit = $('max-calls').value ? Number($('max-calls').value) : maximum;
+  $('call-estimate').textContent = n ? `About ${typical} calls; up to ${maximum} with revisions and re-asks. Limits: ${limit} calls / ${$('duration').value} min${limit < typical ? '. This call limit may stop before a final answer' : ''}${documentNote()}` : 'Select your members';
   const blocker = state.providers.find(p => state.selected.has(p.id) && !available(p));
   // A signed-out CLI reading can be stale; the server re-probes before spending anything, so only a missing CLI or key hard-blocks here.
   const hard = blocker && !(state.types[blocker.type]?.cli && readiness(blocker).level === 'attention');
@@ -244,7 +247,7 @@ function markdown(text) {
   }).join('');
 }
 function selectTab(tab) {
-  $('answer').classList.toggle('hidden', tab !== 'answer'); $('transcript').classList.toggle('hidden', tab !== 'transcript');
+  $('answer-layout').classList.toggle('hidden', tab !== 'answer'); $('answer').classList.toggle('hidden', tab !== 'answer'); $('transcript').classList.toggle('hidden', tab !== 'transcript');
   $('issues').classList.toggle('hidden', tab !== 'transcript' || !currentRun?.issues?.length);
   document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
 }
@@ -263,12 +266,14 @@ function renderEntry(run, e) {
   const chips = [];
   if (e.phase === 'floor' && e.speaker !== 'owner' && f.stance) chips.push(`<span class="chip stance-${f.stance}">${f.stance}</span>`);
   if (e.phase === 'ratify' && f.vote) chips.push(`<span class="chip vote-${f.vote}">${f.vote}</span>`);
-  if (e.superseded) chips.push('<span class="chip">re-asked</span>');
+  if (e.superseded) chips.push('<span class="chip">superseded</span>');
   if (e.attempt > 1) chips.push(`<span class="chip">attempt ${e.attempt}</span>`);
   if (e.workspace) chips.push(`<span class="chip">${escapeHTML(e.workspace.level)} in ${escapeHTML(e.workspace.checkout)}</span>`);
   if (f.opinion) chips.push('<span class="chip opinion">opinion, no checks</span>');
   const meta = [];
-  if (f.concedes?.length) meta.push(`Concedes ${f.concedes.map(c => `<b>${escapeHTML(c.entry)}</b> “${escapeHTML(c.quote)}”`).join('; ')}`);
+  const citations = citationEvidence(run, e);
+  if (citations.valid.length) meta.push(`Concedes ${citations.valid.map(c => `${entryLink(run, c.entry)} “${escapeHTML(c.quote)}”`).join('; ')}`);
+  for (const c of [...citations.invalid, ...(f.invalidConcessions || [])]) meta.push(`<span class="citation-invalid">Citation not counted: ${escapeHTML(c.entry)} “${escapeHTML(c.quote)}” — ${escapeHTML(c.reason)}</span>`);
   for (const o of f.objections || []) meta.push(`Objects${o.against ? ` to ${escapeHTML(who(run, o.against))}` : ''}: “${escapeHTML(o.claim)}”${o.condition ? ` — resolves when ${escapeHTML(o.condition)}` : ''}`);
   if (f.resolves?.length) meta.push(`Resolves ${f.resolves.map(escapeHTML).join(', ')}`);
   if (f.settle) meta.push(`Would be settled by: ${escapeHTML(f.settle)}`);
@@ -277,28 +282,74 @@ function renderEntry(run, e) {
   if (f.openPoints?.length) meta.push(`Open: ${f.openPoints.map(escapeHTML).join('; ')}`);
   if (f.unresolved?.length) meta.push(`Left unresolved: ${f.unresolved.map(escapeHTML).join(', ')}`);
   if (f.reason && e.phase === 'ratify') meta.push(escapeHTML(f.reason));
+  if (e.candidateHash) meta.push(`Reviewed commit <code>${escapeHTML(e.candidateHash.slice(0, 12))}</code>`);
   if (e.note) meta.push(escapeHTML(e.note));
   let extras = '';
   if (e.candidate) {
     const c = e.candidate;
-    extras += `<div class="candidate"><div><b>Candidate commit ${escapeHTML(c.hash.slice(0, 12))}</b> on ${escapeHTML(c.branch)}${c.changed ? '' : ' <span class="warn">(no file changes)</span>'}${c.artifact ? `. <a href="/api/runs/${run.id}/patch">Download patch</a>` : ''}</div>${c.files.length ? `<ul class="files">${c.files.map(fi => `<li><code>${escapeHTML(fi.status)}</code> ${escapeHTML(fi.path)}</li>`).join('')}</ul>` : ''}${c.patch ? `<details><summary>Patch (${c.bytes.toLocaleString()} bytes)</summary><pre>${escapeHTML(c.patch)}</pre></details>` : ''}${c.checks.length ? c.checks.map(k => `<details${k.code === 0 ? '' : ' open'}><summary>$ ${escapeHTML(k.command)} → ${k.code === 0 ? 'passed' : k.code === null ? 'could not run' : `exit ${k.code}`} (${k.seconds}s)</summary><pre>${escapeHTML(k.output)}</pre></details>`).join('') : '<div class="warn">No checks configured; ballots on this candidate are opinions.</div>'}</div>`;
+    const checkNote = c.checkStatus === 'running' ? 'Checks are running. Voting waits for the results.' : c.checkStatus === 'pending' ? 'Verification is unfinished. Checks must finish before voting or applying.' : !c.checks.length ? 'No checks configured; ballots on this candidate are opinions.' : '';
+    extras += `<div class="candidate"><div><b>Candidate commit ${escapeHTML(c.hash.slice(0, 12))}</b> on ${escapeHTML(c.branch)}${c.changed ? '' : ' <span class="warn">(no file changes)</span>'}${c.artifact ? `. <a href="/api/runs/${run.id}/patch">Download patch</a>` : ''}</div>${c.files.length ? `<ul class="files">${c.files.map(fi => `<li><code>${escapeHTML(fi.status)}</code> ${escapeHTML(fi.path)}</li>`).join('')}</ul>` : ''}${c.patch ? `<details><summary>Patch (${c.bytes.toLocaleString()} bytes)</summary><pre>${escapeHTML(c.patch)}</pre></details>` : ''}${c.checks.length ? c.checks.map(k => `<details${k.code === 0 ? '' : ' open'}><summary>$ ${escapeHTML(k.command)} → ${k.code === 0 ? 'passed' : k.code === null ? 'could not run' : `exit ${k.code}`} (${k.seconds}s)</summary><pre>${escapeHTML(k.output)}</pre></details>`).join('') : ''}${checkNote ? `<div class="warn">${checkNote}</div>` : ''}</div>`;
   }
   if (e.actions?.length) extras += `<details class="activity"><summary>Activity: ${e.actions.length} tool event${e.actions.length === 1 ? '' : 's'}</summary><ul>${e.actions.map(a => `<li><code>${escapeHTML(a.type)}</code> ${a.command ? escapeHTML(a.command) : ''}${a.exitCode !== undefined && a.exitCode !== null ? ` → exit ${a.exitCode}` : ''}${a.paths?.length ? `, ${a.paths.map(escapeHTML).join(', ')}` : ''}</li>`).join('')}</ul></details>`;
-  return `<article class="card msg ${e.speaker === 'owner' ? 'owner' : ''} ${e.reconvene ? 'reconvene' : ''} ${e.status} ${e.superseded ? 'superseded' : ''}" data-entry="${e.id}"><header><span class="entry-status ${e.status}">${icon}</span><strong>${escapeHTML(who(run, e.speaker))}</strong><span>${entryTag(run, e)}${e.addressedOwner ? ', answering you' : ''}</span>${chips.join('')}<small>${escapeHTML(e.id)}, ${e.status === 'running' ? 'speaking' : e.status}, ${elapsed(e)}</small></header><div class="msg-body">${e.text ? markdown(e.text) : `<p>${escapeHTML(e.error || 'Speaking…')}</p>`}${meta.map(m => `<p class="entry-meta">${m}</p>`).join('')}${extras}</div></article>`;
+  return `<article class="card msg ${e.speaker === 'owner' ? 'owner' : ''} ${e.reconvene ? 'reconvene' : ''} ${e.status} ${e.superseded ? 'superseded' : ''}" id="entry-${escapeHTML(e.id)}" data-entry="${escapeHTML(e.id)}" tabindex="-1"><header><span class="entry-status ${e.status}">${icon}</span><strong>${escapeHTML(who(run, e.speaker))}</strong><span>${entryTag(run, e)}${e.addressedOwner ? ', answering you' : ''}</span>${chips.join('')}<small>${escapeHTML(e.id)}, ${e.status === 'running' ? 'speaking' : e.status}, ${elapsed(e)}</small></header><div class="msg-body">${e.text ? markdown(e.text) : `<p>${escapeHTML(e.error || 'Speaking…')}</p>`}${meta.map(m => `<p class="entry-meta">${m}</p>`).join('')}${extras}</div></article>`;
 }
+function entryLink(run, id, label = id) {
+  return run.entries.some(e => e.id === id) ? `<a href="#entry-${encodeURIComponent(id)}" data-jump-entry="${escapeHTML(id)}">${escapeHTML(label)}</a>` : escapeHTML(label);
+}
+function renderEvidence(run, result) {
+  const panel = $('result-evidence'); panel.classList.toggle('hidden', !isMeeting(run));
+  $('answer-layout').classList.toggle('without-evidence', !isMeeting(run));
+  if (!isMeeting(run)) return;
+  const { candidate, draft, ballots, openIssues } = result;
+  const objections = [
+    ...openIssues.map(i => `<li>${entryLink(run, i.entry, i.id)}: ${escapeHTML(i.claim)}<br><small>Resolves when: ${escapeHTML(i.condition)}</small></li>`),
+    ...ballots.filter(b => b.fields?.vote === 'object').map(b => `<li>${entryLink(run, b.id, who(run, b.speaker))}: ${(b.fields.objections || []).length ? b.fields.objections.map(o => `${escapeHTML(o.claim)}<br><small>Resolves when: ${escapeHTML(o.condition)}</small>`).join('<br>') : escapeHTML(b.fields.reason || 'Unspecified objection')}</li>`),
+    ...(draft?.fields?.unresolved || []).filter(id => !openIssues.some(i => i.id === id)).map(id => `<li>Candidate caveat: ${escapeHTML(id)}</li>`),
+  ];
+  const citations = run.entries.filter(e => e.status === 'complete' && !e.superseded && (e.session || 1) === (run.session || 1)).flatMap(e => citationEvidence(run, e).valid.map(c => `<li>“${escapeHTML(c.quote)}”<br><small>${entryLink(run, c.entry, `Source ${c.entry}`)} · ${entryLink(run, e.id, `${who(run, e.speaker)}'s concession`)}</small></li>`));
+  const checks = candidate?.checks || [];
+  panel.innerHTML = `<h3>Evidence and review</h3><p class="verdict verdict-${result.code}">${escapeHTML(result.label)}</p><p>${escapeHTML(result.verification)}</p>
+    <h4>Candidate</h4><p>${draft ? entryLink(run, draft.id, candidate ? `Commit ${candidate.hash.slice(0, 12)} · v${draft.candidateVersion}` : `Text candidate v${draft.candidateVersion}`) : 'No candidate yet.'}</p>
+    <h4>Votes</h4><ul>${ballots.map(b => `<li>${entryLink(run, b.id, who(run, b.speaker))}: ${escapeHTML(b.fields?.vote || 'abstain')}</li>`).join('')}</ul><p>${result.missingBallots} missing; ${result.votes.abstain} abstained.</p>
+    <h4>Unresolved objections</h4>${objections.length ? `<ul>${objections.join('')}</ul>` : '<p>None recorded.</p>'}
+    <h4>Check results</h4>${checks.map(c => `<details${c.code === 0 ? '' : ' open'}><summary>${escapeHTML(c.command)} — ${c.code === 0 ? 'passed' : c.code === null ? 'incomplete' : `exit ${c.code}`}</summary><pre>${escapeHTML(c.output)}</pre></details>`).join('') || `<p>${run.workspace?.checks?.length ? 'Waiting for configured checks.' : 'No automated checks configured.'}</p>`}
+    <h4>Validated concessions</h4>${citations.length ? `<ul>${citations.join('')}</ul>` : '<p>No validated concession citations in this session.</p>'}<p class="field-hint">A matching quotation establishes traceability, not the truth of the claim.</p>`;
+}
+function renderUsage(run) {
+  if (!run) return;
+  const tokens = run.entries.reduce((sum, e) => sum + (e.usage?.input || 0) + (e.usage?.output || 0), 0);
+  const seconds = Math.floor(elapsedBudget(run) / 1000), time = `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  $('usage').textContent = run.budget ? `Session ${run.session || 1}: ${callsUsed(run)} / ${run.budget.maxCalls} calls · ${time} / ${run.budget.maxDurationSeconds / 60} min${run.session > 1 ? ` · ${callsUsed(run, true)} calls overall` : ''}${tokens ? ` · ${tokens.toLocaleString()} reported tokens overall` : ''}` : `${callsUsed(run, true)} calls${tokens ? ` · ${tokens.toLocaleString()} reported tokens` : ''}`;
+}
+setInterval(() => { if (currentRun?.status === 'running') renderUsage(currentRun); }, 1000);
+document.addEventListener('click', event => {
+  const link = event.target.closest('[data-jump-entry]');
+  if (!link || !currentRun) return;
+  event.preventDefault(); selectTab('transcript');
+  const target = document.getElementById(`entry-${link.dataset.jumpEntry}`);
+  if (target) {
+    document.querySelectorAll('.linked-entry').forEach(e => e.classList.remove('linked-entry'));
+    target.classList.add('linked-entry'); target.scrollIntoView({ behavior: 'smooth', block: 'center' }); target.focus({ preventScroll: true });
+  }
+});
 function renderRun(run) {
+  const changedSession = currentRun?.id !== run.id || currentRun?.session !== run.session;
+  const wasShowingLimits = !$('limit-form').classList.contains('hidden');
   currentRun = run;
   $('discussion').classList.remove('hidden'); $('workspace').classList.add('run-view'); $('page-crumb').textContent = 'Discussion';
   const meeting = isMeeting(run);
   $('run-label').textContent = run.demo ? 'Scripted demo. No model calls.' : '';
-  const titles = { opening: 'Members are writing their positions.', floor: 'The council has the floor.', draft: 'The drafter is writing the candidate.', ratify: 'Members are voting on the candidate.', propose: 'Independent ideas are taking shape.', review: 'The council is comparing notes.', synthesize: 'Bringing the best ideas together.' };
-  const closed = { consensus: 'The council reached consensus.', budget: 'The meeting closed on budget.', stalled: 'The meeting stalled; a candidate was drafted.' };
-  $('run-title').textContent = (run.status === 'complete' ? (closed[run.stopReason] || 'The discussion is complete.') : run.status === 'running' ? (titles[run.phase] || 'The council is thinking.') : `${meeting ? 'Meeting' : 'Discussion'} ${run.status}.`);
+  const titles = { opening: 'Members are writing their positions.', floor: 'The council has the floor.', draft: 'The drafter is writing the candidate.', check: 'Checking the candidate before voting.', ratify: 'Members are voting on the candidate.', propose: 'Independent ideas are taking shape.', review: 'The council is comparing notes.', synthesize: 'Bringing the best ideas together.' };
+  const result = assessResult(run);
+  $('run-title').textContent = run.status === 'complete' ? (meeting ? result.label : 'The discussion is complete.') : run.status === 'limited' ? 'Session limit reached.' : run.status === 'running' ? (titles[run.phase] || 'The council is thinking.') : `${meeting ? 'Meeting' : 'Discussion'} ${run.status}.`;
+  $('floor-outcome').textContent = meeting && run.stopReason ? `Discussion closed: ${run.stopReason === 'budget' ? 'cycle budget reached' : run.stopReason}. Final candidate review is shown separately.` : '';
   $('run-prompt').textContent = run.prompt;
   $('cancel').classList.toggle('hidden', run.status !== 'running'); $('cancel').disabled = false;
-  const remaining = Math.max(1, run.plannedCalls - run.entries.filter(e => e.status === 'complete').length);
-  $('resume').classList.toggle('hidden', !meeting || !['failed', 'interrupted', 'cancelled'].includes(run.status)); $('resume').disabled = false;
-  $('resume').textContent = run.phase === 'draft' && run.stopReason ? 'Retry the draft (1 call)' : `Resume meeting (up to ${remaining} call${remaining === 1 ? '' : 's'})`;
+  const remaining = Math.max(0, (run.budget?.maxCalls || run.plannedCalls) - callsUsed(run));
+  const stopped = meeting && ['failed', 'interrupted', 'cancelled', 'limited'].includes(run.status);
+  const needsLimits = stopped && (run.status === 'limited' || (run.budget && (callsUsed(run) >= run.budget.maxCalls || elapsedBudget(run) >= run.budget.maxDurationSeconds * 1000)));
+  $('resume').classList.toggle('hidden', !stopped || needsLimits); $('resume').disabled = false;
+  $('resume').textContent = run.phase === 'check' ? 'Retry candidate checks' : run.phase === 'draft' && run.stopReason ? 'Resume candidate preparation' : `Resume meeting (up to ${remaining} call${remaining === 1 ? '' : 's'})`;
   $('export').href = `/api/runs/${run.id}/export`;
   const ws = run.workspace;
   const docs = run.attachments || [], docState = run.documents?.state;
@@ -311,21 +362,22 @@ function renderRun(run) {
   $('run-workspace').classList.toggle('hidden', !ws);
   $('run-workspace').classList.toggle('start-blocker', ws?.level === 'full-access');
   if (ws) $('run-workspace').textContent = [`Workspace ${ws.name}, ${ws.level === 'full-access' ? 'full access' : ws.level}`, ws.attachedFrom && ws.attachedFrom !== 'localhost' ? `attached from ${ws.attachedFrom}` : '', ws.branch ? `branch ${ws.branch}` : '', ws.network ? 'network on' : '', ws.applied ? `applied into ${ws.applied.into} at ${new Date(ws.applied.at).toLocaleTimeString()}` : ws.discarded ? 'branch discarded' : '', ws.measurement ? `blast radius ${ws.measurement.score ?? '?'} of 100` : '', (ws.canary?.detail || '').replace(/\.$/, '')].filter(Boolean).join('. ') + '.';
-  const candidate = ws && [...run.entries].reverse().find(e => e.phase === 'draft' && e.status === 'complete' && e.candidate)?.candidate;
+  const candidate = ws && [...run.entries].reverse().find(e => e.phase === 'draft' && e.status === 'complete' && !e.superseded && e.candidateVersion === run.candidateVersion && e.candidate)?.candidate;
   const canAct = Boolean(candidate) && run.status !== 'running' && !ws.applied && !ws.discarded;
-  $('apply').classList.toggle('hidden', !canAct); $('discard').classList.toggle('hidden', !canAct); $('apply').disabled = $('discard').disabled = false;
+  const checksFinished = candidate && (!candidate.checkStatus || candidate.checkStatus === 'complete') && candidate.checks.length === ws.checks.length && ws.checks.every((command, i) => candidate.checks[i].command === command && Number.isInteger(candidate.checks[i].code));
+  $('apply').classList.toggle('hidden', !canAct || !checksFinished); $('discard').classList.toggle('hidden', !ws?.branch || run.status === 'running' || Boolean(ws.applied || ws.discarded)); $('apply').disabled = $('discard').disabled = false;
   if (canAct) $('apply').textContent = `Apply ${candidate.hash.slice(0, 8)} to ${ws.name}`;
   $('run-error').classList.toggle('hidden', !run.error); $('run-error').textContent = run.error || '';
-  const steps = meeting ? [['opening', 'Opening'], ['floor', run.phase === 'floor' ? `Floor, cycle ${Math.min(run.cycles, 1 + Math.floor(run.entries.filter(e => e.phase === 'floor' && e.speaker !== 'owner' && e.status === 'complete' && !e.superseded && (e.session || 1) === (run.session || 1)).length / Math.max(1, run.participants.length - (run.dropped?.length || 0))))} of ${run.cycles}` : `Floor, ${run.cycles} cycle${run.cycles !== 1 ? 's' : ''}`], ['draft', 'Draft'], ['ratify', 'Ratify']] : [['propose', 'Independent proposals'], ['review', `${run.rounds} review round${run.rounds !== 1 ? 's' : ''}`], ['synthesize', 'Final synthesis']];
+  const steps = meeting ? [['opening', 'Opening'], ['floor', run.phase === 'floor' ? `Floor, cycle ${Math.min(run.cycles, run.floorCycle || 1 + Math.floor(run.entries.filter(e => e.phase === 'floor' && e.speaker !== 'owner' && e.status === 'complete' && !e.superseded && (e.session || 1) === (run.session || 1)).length / Math.max(1, run.participants.length - (run.dropped?.length || 0))))} of ${run.cycles}` : `Floor, ${run.cycles} cycle${run.cycles !== 1 ? 's' : ''}`], ['draft', 'Draft'], ...(ws && ws.level !== 'read-only' ? [['check', 'Checks']] : []), ['ratify', 'Ratify']] : [['propose', 'Independent proposals'], ['review', `${run.rounds} review round${run.rounds !== 1 ? 's' : ''}`], ['synthesize', 'Final synthesis']];
   const index = run.status === 'complete' ? steps.length : steps.findIndex(([phase]) => phase === run.phase);
   $('run-progress').innerHTML = steps.map(([, label], i) => `<div class="progress-step ${i < index ? 'done' : i === index ? 'current' : ''}"><span>${i < index ? '✓' : i + 1}</span>${label}</div>`).join('');
   $('entry-count').textContent = run.entries.length;
-  const tokens = run.entries.reduce((sum, e) => sum + (e.usage?.input || 0) + (e.usage?.output || 0), 0);
-  const done = run.entries.filter(e => e.status === 'complete').length;
-  $('usage').textContent = meeting ? `${done} of up to ${run.plannedCalls} calls${tokens ? `, ${tokens.toLocaleString()} tokens` : ''}` : `${done} of ${run.plannedCalls} calls${tokens ? `, ${tokens.toLocaleString()} tokens` : ''}`;
-  const metricsLine = run.record ? `<p class="record-line">${run.record.metrics.floorTurns} floor turns, ${run.record.metrics.stanceChanges} stance changes, ${run.record.metrics.citedConcessions} cited concessions, ${run.record.metrics.objectionsResolved} of ${run.record.metrics.objectionsRaised} objections resolved${run.record.metrics.ownerInterjections ? `, you spoke ${run.record.metrics.ownerInterjections} time${run.record.metrics.ownerInterjections === 1 ? '' : 's'}` : ''}.</p>` : '';
+  renderUsage(run); renderEvidence(run, result);
+  const citedConcessions = run.entries.filter(e => e.phase === 'floor' && e.status === 'complete' && !e.superseded && (e.session || 1) === (run.session || 1)).reduce((sum, e) => sum + citationEvidence(run, e).valid.length, 0);
+  const metricsLine = run.record ? `<p class="record-line">${run.record.metrics.floorTurns} floor turns, ${run.record.metrics.stanceChanges} stance changes, ${citedConcessions} cited concessions, ${run.record.metrics.objectionsResolved} of ${run.record.metrics.objectionsRaised} objections resolved${run.record.metrics.ownerInterjections ? `, you spoke ${run.record.metrics.ownerInterjections} time${run.record.metrics.ownerInterjections === 1 ? '' : 's'}` : ''}.</p>` : '';
   const earlier = (run.sessions || []).length ? `<details class="earlier-sessions"><summary>Earlier sessions (${run.sessions.length})</summary>${run.sessions.map(s => `<section><h4>Session ${s.session}${s.stopReason ? `, closed by ${s.stopReason}` : s.status ? `, ${s.status}` : ''}</h4>${s.final ? markdown(s.final) : '<p>No final answer.</p>'}</section>`).join('')}</details>` : '';
   $('answer').innerHTML = run.final ? metricsLine + markdown(run.final) + earlier : `<div class="answer-waiting"><span class="${run.status === 'running' ? 'thinking-symbol' : ''}">◈</span><h3>${run.status === 'running' ? (meeting ? 'The meeting is in session.' : 'Good answers are worth a conversation.') : 'The thread is saved.'}</h3><p>${run.status === 'running' ? `Open the ${meeting ? 'Meeting' : 'Discussion'} tab to follow each contribution as it arrives${meeting ? ', or speak to the council below' : ''}.` : 'Review the transcript for completed contributions and connection errors.'}</p></div>`;
+  if (!run.final && run.status !== 'running' && result.draft) $('answer').innerHTML = '<p class="notice">Unfinished candidate — review is not complete.</p>' + markdown(result.draft.text) + earlier;
   if (meeting) $('transcript').innerHTML = run.entries.map(e => renderEntry(run, e)).join('');
   else {
     const openEntries = new Set([...$('transcript').querySelectorAll('details[open]')].map(el => el.dataset.entry));
@@ -336,17 +388,23 @@ function renderRun(run) {
   $('issues').innerHTML = `<h3>Objections</h3>` + issues.map(i => `<div class="issue"><b>${escapeHTML(i.id)}</b><span>${escapeHTML(who(run, i.raisedBy))} → ${escapeHTML(who(run, i.against))}: “${escapeHTML(i.claim)}”<br>Resolves when ${escapeHTML(i.condition)}</span><span class="chip ${i.status === 'resolved' ? 'vote-approve' : 'vote-object'}">${i.status}</span></div>`).join('');
   $('say-form').classList.toggle('hidden', !meeting || run.status !== 'running');
   $('reconvene-form').classList.toggle('hidden', !meeting || run.demo || run.status === 'running' || !run.floorStarted); $('reconvene-form').querySelector('button').disabled = false;
+  $('limit-form').classList.toggle('hidden', !needsLimits);
+  if (needsLimits && (changedSession || !wasShowingLimits)) {
+    $('resume-max-calls').value = run.budget.maxCalls;
+    $('resume-duration').value = Math.ceil(run.budget.maxDurationSeconds / 60);
+  }
+  if (changedSession) { $('reconvene-max-calls').value = ''; $('reconvene-duration').value = Math.ceil((run.budget?.maxDurationSeconds || 3600) / 60); }
   $('say-note').textContent = run.pendingOwner?.length ? `${run.pendingOwner.length} message${run.pendingOwner.length === 1 ? '' : 's'} queued for the next turn.` : 'Delivered at the next turn. The next member must address you.';
   updateEstimate();
 }
 function watchRun(run) {
-  events?.close(); renderRun(run); selectTab(run.status === 'complete' ? 'answer' : 'transcript');
+  events?.close(); renderRun(run); selectTab(['complete', 'limited'].includes(run.status) ? 'answer' : 'transcript');
   if (run.status !== 'running') return;
   events = new EventSource(`/api/runs/${run.id}/events`);
   events.onmessage = event => {
     const value = JSON.parse(event.data), wasRunning = currentRun?.status === 'running'; renderRun(value);
     // A run watched to completion lands on its answer; a failure stays on the transcript where the error is open.
-    if (wasRunning && value.status === 'complete') selectTab('answer');
+    if (wasRunning && ['complete', 'limited'].includes(value.status)) selectTab('answer');
     if (value.status !== 'running') { events.close(); refreshHistory().catch(error => toast(error.message)); }
   };
   events.onerror = () => { $('run-error').classList.remove('hidden'); $('run-error').textContent = 'Reconnecting to the local server…'; };
@@ -360,7 +418,7 @@ async function startRun(demo = false) {
   if (!demo && (state.attachments || []).some(a => a.uploading)) return toast('Wait for the documents to finish uploading.');
   $('start').disabled = true; $('demo').disabled = true;
   try {
-    const run = await api('/api/runs', 'POST', { prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), revisions: Number($('revisions')?.value ?? 1), demo, workspace: demo ? undefined : workspacePayload(), attachmentIds: demo ? undefined : (state.attachments || []).filter(a => a.id).map(a => a.id) });
+    const run = await api('/api/runs', 'POST', { prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), revisions: Number($('revisions')?.value ?? 1), maxCalls: demo || !$('max-calls').value ? undefined : Number($('max-calls').value), maxDurationSeconds: demo ? 3600 : Number($('duration').value) * 60, demo, workspace: demo ? undefined : workspacePayload(), attachmentIds: demo ? undefined : (state.attachments || []).filter(a => a.id).map(a => a.id) });
     if (!demo && run.attachments?.length) { state.attachments = []; renderAttachments(); }
     showPage('workspace'); watchRun(run); await refreshHistory(); $('discussion').scrollIntoView({ behavior: 'smooth', block: 'start' });
     if (!demo && run.workspace) api('/api/workspace').then(config => { state.workspaceConfig = config; workspaceSetup(); }).catch(() => {}); // the workspace just became a recent
@@ -496,12 +554,12 @@ $('rotate-lan-code').onclick = async () => { try { const access = await api('/ap
 $('lan-dialog').addEventListener('close', () => { $('lan-code').value = ''; });
 $('copy-lan-code').onclick = async () => { try { await navigator.clipboard.writeText($('lan-code').value); toast('Pairing code copied.'); } catch { $('lan-code').select(); toast('Select and copy the code with your keyboard.'); } };
 $('prompt').oninput = () => { $('char-count').textContent = `${$('prompt').value.length.toLocaleString()} / 24,000`; saveDraft(); };
-$('rounds').onchange = () => { updateEstimate(); saveDraft(); };
+$('rounds').onchange = $('revisions').onchange = $('max-calls').oninput = $('duration').oninput = () => { updateEstimate(); saveDraft(); };
 $('synthesizer').onchange = $('max-tokens').onchange = $('timeout').onchange = saveDraft;
 $('reconvene-form').addEventListener('submit', async event => {
   event.preventDefault(); const text = $('reconvene-text').value.trim(); if (!text || !currentRun) return;
   const button = event.submitter; button.disabled = true;
-  try { const run = await api(`/api/runs/${currentRun.id}/reconvene`, 'POST', { text, cycles: Number($('reconvene-cycles').value) }); $('reconvene-text').value = ''; watchRun(run); renderHistory(); toast(`Session ${run.session} is open. The next member will address you.`); }
+  try { const run = await api(`/api/runs/${currentRun.id}/reconvene`, 'POST', { text, cycles: Number($('reconvene-cycles').value), maxCalls: $('reconvene-max-calls').value ? Number($('reconvene-max-calls').value) : undefined, maxDurationSeconds: Number($('reconvene-duration').value) * 60 }); $('reconvene-text').value = ''; watchRun(run); renderHistory(); toast(`Session ${run.session} is open. The next member will address you.`); }
   catch (error) { toast(error.message); button.disabled = false; }
 });
 $('say-form').addEventListener('submit', async event => {
@@ -527,6 +585,14 @@ $('resume').onclick = async () => {
   try { const run = await api(`/api/runs/${currentRun.id}/resume`, 'POST'); watchRun(run); await refreshHistory(); }
   catch (error) { toast(error.message); $('resume').disabled = false; }
 };
+$('limit-form').addEventListener('submit', async event => {
+  event.preventDefault(); if (!currentRun) return;
+  const button = event.submitter; button.disabled = true;
+  try {
+    const run = await api(`/api/runs/${currentRun.id}/resume`, 'POST', { maxCalls: Number($('resume-max-calls').value), maxDurationSeconds: Number($('resume-duration').value) * 60 });
+    watchRun(run); await refreshHistory();
+  } catch (error) { toast(error.message); } finally { button.disabled = false; }
+});
 document.querySelectorAll('[data-example]').forEach(button => button.onclick = () => { $('prompt').value = button.dataset.example; $('prompt').dispatchEvent(new Event('input')); $('prompt').focus(); });
 document.querySelectorAll('[data-tab]').forEach(button => button.onclick = () => selectTab(button.dataset.tab));
 $('start').onclick = () => startRun(); $('demo').onclick = () => startRun(true);
@@ -540,7 +606,7 @@ $('reuse').onclick = () => { const prompt = currentRun.prompt; newDiscussion(); 
     const draft = readDraft(), restored = (draft.selected || []).filter(id => state.providers.some(p => p.id === id));
     state.selected = new Set(restored.length ? restored : state.providers.slice(0, 2).map(p => p.id));
     if (draft.prompt) $('prompt').value = draft.prompt;
-    for (const [id, value] of [['rounds', draft.rounds], ['max-tokens', draft.maxTokens], ['timeout', draft.timeout]]) if (value) $(id).value = value;
+    for (const [id, value] of [['rounds', draft.rounds], ['revisions', draft.revisions], ['max-calls', draft.maxCalls], ['duration', draft.duration], ['max-tokens', draft.maxTokens], ['timeout', draft.timeout]]) if (value) $(id).value = value;
     renderProviders(); if (draft.synthesizer && state.selected.has(draft.synthesizer)) $('synthesizer').value = draft.synthesizer;
     if (draft.workspacePath) $('workspace-path').value = draft.workspacePath; if (draft.workspaceChecks) $('workspace-checks').value = draft.workspaceChecks;
     try { state.workspaceConfig = await api('/api/workspace'); } catch { state.workspaceConfig = {}; }

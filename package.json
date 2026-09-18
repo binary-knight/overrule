@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "A private, local council of AI models",
+  "license": "Apache-2.0",
   "engines": { "node": ">=22" },
-  "scripts": { "start": "node server.mjs", "test": "node --test test/*.test.mjs", "check": "node --check server.mjs && node --check public/app.js" }
+  "scripts": { "start": "node server.mjs", "restart": "bash restart.sh", "test": "node --test test/*.test.mjs", "test:restart": "python3 test/restart_test.py", "check": "node --check server.mjs && node --check public/app.js" }
 }

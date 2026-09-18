@@ -196,7 +196,7 @@ main{max-width:1040px;margin:0 auto;padding:28px 32px 40px}
 .actions{display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0}
 .actions .button{padding:7px 12px;font-size:14px}
 .run-prompt{font-size:15px;line-height:1.55;color:var(--text-2);white-space:pre-wrap;max-height:120px;overflow:auto;margin-top:10px;max-width:80ch}
-.run-workspace{font-size:14px;color:var(--muted);margin:8px 0 0}
+.run-workspace{font-size:14px;color:var(--muted);margin:8px 0 0;overflow-wrap:anywhere}
 .run-workspace.start-blocker{color:var(--danger-text);font-weight:600}
 .progress-steps{display:flex;gap:24px;margin:18px 0}
 .progress-step{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--muted)}
@@ -335,7 +335,7 @@ dialog label{margin:12px 0 0}
 @media(max-width:650px){.sidebar{position:relative;width:100%;padding:12px 16px;flex-direction:row;align-items:center;gap:10px;border-right:0;border-bottom:1px solid var(--line)}.brand{margin:0;margin-right:auto;font-size:16px}.sidebar .wide{width:auto;font-size:14px;padding:6px 10px;order:3}.sidebar nav{display:flex;margin:0;gap:0}.nav-item{font-size:0;padding:8px}.nav-item>span:first-child{font-size:16px;width:auto}.nav-item .count,.history-heading,.history,.sidebar-footer{display:none}.main-shell{margin:0}.topbar{height:46px;padding:0 16px;font-size:13px}#session-label{display:none}main{padding:18px 16px 28px}h1{font-size:22px}.participants,.run-options{grid-template-columns:1fr}.right-column{grid-template-columns:1fr}.start-row{flex-direction:column;align-items:stretch}.start-row .button{width:100%}.toast{left:50%;max-width:calc(100% - 32px);width:max-content}.result-tabs{gap:14px;flex-wrap:wrap}.usage{width:100%;margin:0;padding-bottom:8px}.discussion-top h2{font-size:19px}.answer{padding:16px}.msg header{padding:10px 12px}.msg-body,.entry-body{padding:12px 14px}.boundary{grid-template-columns:1fr}.workspace-row{flex-direction:column;align-items:stretch}.page-footer{padding:10px 16px 20px}}
 #security-off{margin:0 0 16px}
 .brand{white-space:nowrap}.topbar>div:first-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.progress-steps{flex-wrap:wrap}.transcript,.answer,.msg,.msg-body,.candidate{min-width:0;max-width:100%}.msg-body pre,.candidate pre,.answer pre{max-width:100%}@media(max-width:650px){.discussion-top .actions{width:100%}.discussion-top .actions .button{flex:1 1 auto}.msg header small{margin-left:0;width:100%}}
+.progress-steps{flex-wrap:wrap}.transcript,.answer,.msg,.msg-body,.candidate{min-width:0;max-width:100%}.msg-body pre,.candidate pre,.answer pre{max-width:100%}@media(max-width:650px){.discussion-top .actions{width:100%}.discussion-top .actions .button{flex:1 1 auto;min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere;text-align:center}.msg header small{margin-left:0;width:100%}}
 @media(max-width:650px){.sidebar{flex-wrap:wrap;row-gap:8px}.sidebar .wide{flex-shrink:0;padding:6px 10px;font-size:13px;white-space:nowrap}.sidebar nav{flex-shrink:0}.brand{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}}
 .install-help{margin:12px 24px 0;border:1px solid var(--warn-line);background:var(--warn-bg);border-radius:6px;padding:12px 14px;font-size:14px;color:var(--text-2);line-height:1.55}.install-help p{margin:0}.install-help p+p{margin-top:8px}.install-help pre{margin:10px 0;white-space:pre;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:10px 12px;font-size:13px}#security-off{margin:0 0 16px}.browser-entry.unselectable{color:var(--muted)}.browser-entry.unselectable span:last-child{font-size:12px}
 .install-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0}.install-row span{font-size:13px;color:var(--muted);flex:1;min-width:200px}.install-log{margin:8px 0 0;max-height:220px;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:10px 12px;font-size:12px;white-space:pre-wrap}
@@ -363,3 +363,17 @@ dialog label{margin:12px 0 0}
 .earlier-sessions section{margin-top:12px;padding:12px 14px;border:1px solid var(--line);border-radius:6px;background:var(--tint)}
 .earlier-sessions h4{margin:0 0 8px;font-size:14px}
 .msg.owner.reconvene{border-style:dashed}
+
+/* Candidate verdict, evidence, and session limits. */
+.session-limits{padding:20px 24px;border-top:1px solid var(--line)}
+.session-limits .run-options{margin:12px 0}.session-limits .field-hint{margin:8px 0 0}
+.answer-layout{display:grid;grid-template-columns:minmax(0,2fr) minmax(260px,1fr);gap:18px;align-items:start}
+.result-evidence{padding:18px;min-width:0;font-size:14px;overflow-wrap:anywhere}
+.result-evidence h4{margin:18px 0 6px}.result-evidence p{margin:6px 0}.result-evidence ul{padding-left:18px;margin:6px 0}.result-evidence li{margin:9px 0}
+.result-evidence pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;font-size:12px}
+.verdict{font-weight:600;padding:7px 10px;border-radius:5px;background:var(--warn-bg);color:var(--warn-text)}
+.verdict-approved{background:var(--ok-bg);color:var(--ok-text)}.verdict-checks-failed{background:var(--bad-bg);color:var(--bad-text)}
+.citation-invalid{color:var(--warn-text)}.linked-entry{outline:3px solid var(--blue-line);outline-offset:3px;scroll-margin:24px}
+#limit-form .button{margin-top:12px}.usage{overflow-wrap:anywhere}.history-dot.limited{background:var(--warn-text)}
+@media(max-width:1100px){.answer-layout{grid-template-columns:minmax(0,1fr)}}
+.answer-layout.without-evidence { grid-template-columns: minmax(0, 1fr); }

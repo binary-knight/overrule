@@ -11,6 +11,7 @@ import { validateWorkspacePath, browseHost, inspect as inspectWorkspace, codexCa
 import { SecurityJobs, listPresets, memberProfiles, validateImage, vendoredAgentsec } from './lib/security.mjs';
 import { Access } from './lib/access.mjs';
 import { Attachments, MAX_FILE_BYTES, MAX_FILES, ACCEPTED } from './lib/attachments.mjs';
+import { assertCoversImplementer } from './lib/budget.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const defaults = [
@@ -248,6 +249,7 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
         if (demo) Object.assign(input, { prompt: DEMO_PROMPT, participantIds: pool.map(p => p.id), drafterId: pool[0].id, cycles: 2 });
         const options = validateRun(input, pool);
         options.workspace = demo ? null : await parseWorkspace(input.workspace, options, local ? 'localhost' : String(req.socket.remoteAddress || 'lan'));
+        assertCoversImplementer(options.maxDurationSeconds, options.workspace);
         if (!demo) await assertReady(options.participants);
         if (mesh.controllers.size >= 2) throw new Error('Two meetings are already running. Stop or finish one first.');
         if (options.workspace) rememberWorkspace(options.workspace.path);
@@ -271,7 +273,7 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
           mesh.say(run, text); return json(res, 200, { ok: true, pending: run.pendingOwner.length });
         }
         if (req.method === 'POST' && (match[2] === 'resume' || match[2] === 'reconvene')) {
-          const input = match[2] === 'reconvene' ? await body(req) : {};
+          const input = match[2] === 'reconvene' || Number(req.headers['content-length']) > 0 || req.headers['transfer-encoding'] ? await body(req) : {};
           const text = String(input.text || '').trim(), cycles = Number(input.cycles ?? 2);
           if (match[2] === 'reconvene' && (!text || text.length > 4000)) throw new Error('Tell the council what to take up next, in 1 to 4,000 characters.');
           if (match[2] === 'reconvene' && (!Number.isInteger(cycles) || cycles < 1 || cycles > 4)) throw new Error('Choose 1–4 cycles for the new session.');
@@ -283,7 +285,7 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
             if (!result.ok) throw new Error(`${run.workspace.level} is refused on this machine: ${result.detail}`);
           }
           if (!run.demo) await assertReady(participants);
-          return json(res, 200, match[2] === 'reconvene' ? await mesh.reconvene(run, participants, { text, cycles }) : mesh.resume(run, participants));
+          return json(res, 200, match[2] === 'reconvene' ? await mesh.reconvene(run, participants, { text, cycles, maxCalls: input.maxCalls, maxDurationSeconds: input.maxDurationSeconds }) : mesh.resume(run, participants, input));
         }
         if (req.method === 'POST' && (match[2] === 'apply' || match[2] === 'discard')) {
           return json(res, 200, match[2] === 'apply' ? await mesh.applyCandidate(run) : await mesh.discardCandidate(run));
@@ -308,7 +310,7 @@ export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 
         }
         if (req.method === 'GET' && !match[2]) return json(res, 200, run);
       }
-      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/theme.js': ['theme.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
+      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/meeting-state.js': ['meeting-state.js', 'text/javascript'], '/theme.js': ['theme.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
       if (req.method === 'GET' && Object.hasOwn(files, url.pathname)) {
         const [file, mime] = files[url.pathname];
         const contents = await readFile(join(root, 'public', file));

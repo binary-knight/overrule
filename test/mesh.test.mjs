@@ -803,7 +803,10 @@ test('a closed meeting can be reconvened: same record, fresh budget, the branch 
   const ids = bootstrap.providers.map(p => p.id);
   assert.match((await (await post('/api/runs', { prompt: 'Build it', participantIds: ids, drafterId: ids[0], cycles: 1, revisions: 9 })).json()).error, /between 0 and 5 revisions/);
   // Session 1: the first ballot objects, the drafter revises in the same checkout, the second ballot approves.
-  const created = await (await post('/api/runs', { prompt: 'Build it in steps', participantIds: ids, drafterId: ids[0], cycles: 1, revisions: 3, workspace: { path: project, level: 'workspace-write', implementTimeout: 7200 } })).json();
+  // A session deadline shorter than the implementer's limit would cancel the draft and discard its checkout, so it is refused up front.
+  const long = { prompt: 'Build it in steps', participantIds: ids, drafterId: ids[0], cycles: 1, revisions: 3, workspace: { path: project, level: 'workspace-write', implementTimeout: 7200 } };
+  assert.match((await (await post('/api/runs', long)).json()).error, /session time limit \(60 min\) is shorter than the implementer time limit \(120 min\).*at least 120 min.*240 min/);
+  const created = await (await post('/api/runs', { ...long, maxDurationSeconds: 14400 })).json();
   assert.equal(created.maxRevisions, 3, JSON.stringify(created));
   const run = mesh.runs.find(r => r.id === created.id); await finished(mesh, run);
   assert.equal(run.status, 'complete'); assert.equal(run.revisions, 1); assert.equal(run.candidateVersion, 2); assert.equal(run.workspace.implementTimeout, 7200);
@@ -817,6 +820,7 @@ test('a closed meeting can be reconvened: same record, fresh budget, the branch 
   // The owner edits main between sessions; the next session must build on that, not on the stale branch tip.
   await writeFile(join(project, 'OWNER-NOTES.md'), 'edited between sessions\n'); await git(project, ['add', '-A']); await git(project, ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'owner edit']);
   assert.match((await (await post(`/api/runs/${run.id}/reconvene`, { text: '', cycles: 1 })).json()).error, /what to take up next/);
+  assert.match((await (await post(`/api/runs/${run.id}/reconvene`, { text: 'Short session', cycles: 1, maxDurationSeconds: 600 })).json()).error, /shorter than the implementer time limit/);
   const again = await (await post(`/api/runs/${run.id}/reconvene`, { text: 'Now add the third step.', cycles: 1 })).json();
   assert.equal(again.session, 2); assert.equal(again.status, 'running'); assert.equal(again.sessions.length, 1); assert.equal(again.sessions[0].stopReason, 'consensus'); assert.ok(again.sessions[0].applied); assert.equal(again.workspace.applied, null);
   const opener = again.entries.find(e => e.reconvene); assert.deepEqual({ session: opener.session, text: opener.text, speaker: opener.speaker }, { session: 2, text: 'Now add the third step.', speaker: 'owner' });
