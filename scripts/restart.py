@@ -73,8 +73,8 @@ def main():
     if len(sys.argv) > 1:
         if sys.argv[1:] not in (["--help"], ["-h"]):
             fail("Unexpected arguments. Use --help for usage.")
-        print("Usage: /home/jknight/model-mesh/restart.sh\n"
-              "Or:    cd /home/jknight/model-mesh && npm restart\n\n"
+        print("Usage: ./restart.sh (from the model-mesh directory, or by its full path)\n"
+              "Or:    npm restart\n\n"
               "Stops only this checkout's server, then starts it in the background.\n"
               "Settings: PORT (default 4310), MESH_HOST, MESH_DATA_DIR, NODE_BIN.\n"
               "Logs and PID are saved in the data directory. Requires Linux, Python 3, Node 22+, and lsof.")
