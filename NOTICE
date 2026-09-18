@@ -1,0 +1,9 @@
+Model Mesh
+Copyright 2026 binary-knight
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+This distribution bundles the agentsec-pack source under vendor/ so the app can
+install it on a host without network access to GitHub. agentsec-pack is a separate
+project (https://github.com/binary-knight/agentsec-pack) with its own license,
+which is included inside that tarball.
