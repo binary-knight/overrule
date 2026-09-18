@@ -1,4 +1,4 @@
-/* Model Mesh. Plain, readable, organized. System fonts, one accent, three state colors. */
+/* Overrule. Plain, readable, organized. System fonts, one accent, three state colors. */
 :root{
   color-scheme:light;
   --bg:#f4f5f7;--surface:#ffffff;--surface-70:#ffffffb3;--text:#1f2933;--text-2:#3e4c59;--muted:#616e7c;--soft:#7b8794;--faint:#cbd2d9;--line:#d9dee5;--line-strong:#b9c1cb;--tint:#f0f2f5;--tint-accent:#eaf1fd;

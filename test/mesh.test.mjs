@@ -350,7 +350,7 @@ test('workspace paths are validated against system folders, symlinks, hidden seg
   const project = join(root, 'project'); await mkdir(join(project, 'node_modules'), { recursive: true }); await mkdir(join(root, '.hidden', 'x'), { recursive: true });
   await writeFile(join(project, '.env'), 'X=1'); await writeFile(join(project, 'id_rsa'), 'k'); await writeFile(join(project, 'node_modules', '.env'), 'ignored'); await writeFile(join(project, 'app.js'), '');
   await symlink(project, join(root, 'link'));
-  const rules = { appRoot: '/home/jknight/model-mesh', dataDir: join(root, 'appdata') }; await mkdir(join(root, 'appdata'));
+  const rules = { appRoot: '/srv/overrule', dataDir: join(root, 'appdata') }; await mkdir(join(root, 'appdata'));
   assert.equal(validateWorkspacePath(project, rules), project);
   assert.throws(() => validateWorkspacePath('/etc', rules), /System directories/); assert.throws(() => validateWorkspacePath('~', rules), /home directory itself/);
   assert.throws(() => validateWorkspacePath(root, rules), /own directory/); // a folder that contains the app's data cannot be a workspace
@@ -766,11 +766,11 @@ test('the prompt states each member’s real access for the turn, and the budget
   const base = { prompt: 'p', participants, drafterId: 'c', cycles: 1, entries: [], issues: [], dropped: [] };
   const access = run => thread(run).split('\n\n').find(block => block.startsWith('ACCESS THIS TURN'));
   assert.equal(access(base), 'ACCESS THIS TURN\n- Codex: no tools.\n- Claude Code: no tools.\n- Sol: no tools.\nThe drafter (Codex) writes the candidate as text at the draft step.');
-  const write = access({ ...base, workspace: { name: 'w', level: 'workspace-write', branch: 'mesh/abc', network: false } });
+  const write = access({ ...base, workspace: { name: 'w', level: 'workspace-write', branch: 'overrule/abc', network: false } });
   assert.match(write, /- Codex: reads files and runs commands in a read-only sandbox; cannot write files\./); assert.match(write, /- Claude Code: reads and searches files; no shell, cannot run commands or write files\./); assert.match(write, /- Sol: no tools; relies on what others quote\./);
-  assert.match(write, /Only the drafter \(Codex\) writes files, at the draft step after the floor closes, in its own checkout of branch mesh\/abc with a shell, no network/); assert.match(write, /Do not ask who holds write access/);
+  assert.match(write, /Only the drafter \(Codex\) writes files, at the draft step after the floor closes, in its own checkout of branch overrule\/abc with a shell, no network/); assert.match(write, /Do not ask who holds write access/);
   assert.match(access({ ...base, workspace: { name: 'w', level: 'read-only' } }), /Nobody writes files at this level/);
-  assert.match(access({ ...base, workspace: { name: 'w', level: 'full-access', branch: 'mesh/abc' } }), /- Codex: full access on this machine, every turn\./);
+  assert.match(access({ ...base, workspace: { name: 'w', level: 'full-access', branch: 'overrule/abc' } }), /- Codex: full access on this machine, every turn\./);
   assert.match(access({ ...base, attachments: [{}] }), /- Sol: no tools; reads the DOCUMENTS text in this prompt\./);
   // Session scoping: eight session-1 turns do not exhaust a one-cycle session 2.
   const turn = (speaker, seq, session, stance = 'agree') => ({ id: `e${seq}`, seq, speaker, name: speaker, phase: 'floor', cycle: 1, session, status: 'complete', fields: { stance, concedes: [], objections: [], resolves: [], openPoints: [] } });
@@ -838,6 +838,6 @@ test('a closed meeting can be reconvened: same record, fresh budget, the branch 
   const third = await (await post(`/api/runs/${run.id}/reconvene`, { text: 'One more.', cycles: 1 })).json(); assert.equal(third.session, 3); await finished(mesh, run);
   assert.equal(run.status, 'complete'); assert.ok((await (await post(`/api/runs/${run.id}/discard`, {})).json()).discarded);
   const fourth = await (await post(`/api/runs/${run.id}/reconvene`, { text: 'After the discard.', cycles: 1 })).json(); assert.equal(fourth.workspace.branch, null); await finished(mesh, run);
-  assert.equal(run.status, 'complete', run.error); assert.equal(run.workspace.branch, `mesh/${run.id.slice(0, 8)}`); assert.deepEqual(latestCandidateOf(run).files.map(f => f.path || f), ['step-5.txt']);
+  assert.equal(run.status, 'complete', run.error); assert.equal(run.workspace.branch, `overrule/${run.id.slice(0, 8)}`); assert.deepEqual(latestCandidateOf(run).files.map(f => f.path || f), ['step-5.txt']);
 });
 const latestCandidateOf = run => [...run.entries].reverse().find(e => e.phase === 'draft' && e.status === 'complete' && e.candidate).candidate;

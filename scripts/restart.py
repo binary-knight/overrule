@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restart this Model Mesh checkout on Linux, without killing unrelated listeners."""
+"""Restart this Overrule checkout on Linux, without killing unrelated listeners."""
 
 import fcntl
 import http.client
@@ -73,10 +73,10 @@ def main():
     if len(sys.argv) > 1:
         if sys.argv[1:] not in (["--help"], ["-h"]):
             fail("Unexpected arguments. Use --help for usage.")
-        print("Usage: ./restart.sh (from the model-mesh directory, or by its full path)\n"
+        print("Usage: ./restart.sh (from the overrule directory, or by its full path)\n"
               "Or:    npm restart\n\n"
               "Stops only this checkout's server, then starts it in the background.\n"
-              "Settings: PORT (default 4310), MESH_HOST, MESH_DATA_DIR, NODE_BIN.\n"
+              "Settings: PORT (default 4310), OVERRULE_HOST, OVERRULE_DATA_DIR, NODE_BIN.\n"
               "Logs and PID are saved in the data directory. Requires Linux, Python 3, Node 22+, and lsof.")
         return
     if sys.platform != "linux":
@@ -90,7 +90,7 @@ def main():
     try:
         version = subprocess.check_output([node, "--version"], text=True).strip()
         if int(version.lstrip("v").split(".")[0]) < 22:
-            fail("Model Mesh needs Node.js 22 or newer.")
+            fail("Overrule needs Node.js 22 or newer.")
         port = int(os.environ.get("PORT", "4310"))
         if not 1 <= port <= 65535:
             raise ValueError()
@@ -98,7 +98,7 @@ def main():
         fail("PORT must be an integer between 1 and 65535.")
     # Check syntax before disturbing the current server.
     subprocess.run([node, "--check", str(ROOT / "server.mjs")], check=True)
-    directory = Path(os.environ.get("MESH_DATA_DIR") or ROOT / "data")
+    directory = Path(os.environ.get("OVERRULE_DATA_DIR") or os.environ.get("MESH_DATA_DIR") or ROOT / "data")
     if not directory.is_absolute():
         directory = ROOT / directory
     directory = directory.resolve()
@@ -118,7 +118,7 @@ def main():
         if any(birth is None for birth in known.values()):
             fail(f"Port {port} belongs to a different process. Nothing was stopped.")
         for pid, birth in known.items():
-            print(f"Stopping Model Mesh (PID {pid})…", flush=True)
+            print(f"Stopping Overrule (PID {pid})…", flush=True)
             if identity(pid) == birth:
                 try:
                     os.kill(pid, signal.SIGTERM)
@@ -130,7 +130,7 @@ def main():
             fail(f"Port {port} is still in use. No replacement was started.")
         with os.fdopen(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab", buffering=0) as log:
             log.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S %Z')} ---\n".encode())
-            env = {**os.environ, "PORT": str(port), "MESH_DATA_DIR": str(directory)}
+            env = {**os.environ, "PORT": str(port), "OVERRULE_DATA_DIR": str(directory)}
             # Ensure the chosen Node installation's sibling CLIs remain on PATH.
             node_path = shutil.which(node) or node
             env["PATH"] = str(Path(node_path).absolute().parent) + os.pathsep + env.get("PATH", "")
@@ -141,7 +141,7 @@ def main():
             )
         with os.fdopen(os.open(pid_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as file:
             file.write(str(child.pid) + "\n")
-        host = env.get("MESH_HOST") or "0.0.0.0"
+        host = env.get("OVERRULE_HOST") or env.get("MESH_HOST") or "0.0.0.0"
         probe_host = "127.0.0.1" if host == "0.0.0.0" else host
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
@@ -149,7 +149,7 @@ def main():
                 pid_path.unlink(missing_ok=True)
                 fail(f"The server exited with code {child.returncode}. See {log_path}")
             if child.pid in listeners(port) and health(probe_host, port):
-                print(f"Model Mesh is running in the background (PID {child.pid}).")
+                print(f"Overrule is running in the background (PID {child.pid}).")
                 print(f"Open: http://{probe_host}:{port}")
                 print(f"Log:  {log_path}")
                 print("LAN devices must pair again; get the current code from LAN access or data/lan.json.")

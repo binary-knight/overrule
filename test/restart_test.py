@@ -31,7 +31,7 @@ class RestartTests(unittest.TestCase):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             self.port = sock.getsockname()[1]
-        self.env = {**os.environ, "PORT": str(self.port), "MESH_HOST": "127.0.0.1", "MESH_DATA_DIR": str(self.app / "data")}
+        self.env = {**os.environ, "PORT": str(self.port), "OVERRULE_HOST": "127.0.0.1", "OVERRULE_DATA_DIR": str(self.app / "data")}
         self.children = []
 
     def tearDown(self):
@@ -69,7 +69,7 @@ class RestartTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertNotEqual(old_pid, (self.app / "data/server.pid").read_text())
         self.assertTrue(self.responding())
-        self.assertIn("Stopping Model Mesh", second.stdout)
+        self.assertIn("Stopping Overrule", second.stdout)
 
     def test_unrelated_listener_is_left_running(self):
         child = subprocess.Popen([sys.executable, "-m", "http.server", str(self.port), "--bind", "127.0.0.1"],

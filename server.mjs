@@ -20,7 +20,7 @@ const defaults = [
 ];
 const demoPool = () => [{ ...defaults[0], id: 'demo-builder', name: 'Demo builder' }, { ...defaults[1], id: 'demo-reviewer', name: 'Demo reviewer' }];
 
-export function createApp({ directory = process.env.MESH_DATA_DIR || join(root, 'data'), providerCall, detect = detectClis, addresses, workspaceRoot = process.env.MESH_WORKSPACE_ROOT || '', canary = codexCanary, checkRunner, measure = (level, cwd) => measureLevel(level, cwd, { dataDir: directory }), securityJobs, documentRunner } = {}) {
+export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process.env.MESH_DATA_DIR || join(root, 'data'), providerCall, detect = detectClis, addresses, workspaceRoot = process.env.OVERRULE_WORKSPACE_ROOT || process.env.MESH_WORKSPACE_ROOT || '', canary = codexCanary, checkRunner, measure = (level, cwd) => measureLevel(level, cwd, { dataDir: directory }), securityJobs, documentRunner } = {}) {
   const store = new Store(directory);
   const access = new Access(store, addresses);
   let providers = store.read('providers.json', defaults.map(p => ({ ...p })));
@@ -331,8 +331,8 @@ function summaries(runs) { return runs.map(({ id, prompt, status, createdAt, dem
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const port = Number(process.env.PORT || 4310);
   const { server, mesh, access } = createApp();
-  server.listen(port, process.env.MESH_HOST || '0.0.0.0', () => {
-    console.log(`Model Mesh is running at http://localhost:${server.address().port}`);
+  server.listen(port, process.env.OVERRULE_HOST || process.env.MESH_HOST || '0.0.0.0', () => {
+    console.log(`Overrule is running at http://localhost:${server.address().port}`);
     for (const url of access.urls(server.address().port)) console.log(`LAN: ${url} (pairing required; view the code in the local app’s LAN access menu)`);
   });
   server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `Port ${port} is in use. Start with PORT=4311 npm start.` : error.message); process.exitCode = 1; });

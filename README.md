@@ -1,4 +1,4 @@
-# Model Mesh
+# Overrule
 
 A local web app where several AI models hold a meeting about your problem and have to show their work. Each member opens with an independent position, then they argue on a shared floor: quoting the claim they answer, raising objections with a condition that would resolve them, and citing what changed their mind. A drafter writes the candidate, the others vote on that exact text, and the result carries the council record: how the floor closed, the vote, and every objection verbatim.
 
@@ -9,12 +9,12 @@ Runs on Node.js 22 or newer with no runtime dependencies. Models come from your 
 ## Install
 
 ```sh
-git clone https://github.com/binary-knight/model-mesh.git
-cd model-mesh
+git clone https://github.com/binary-knight/overrule.git
+cd overrule
 npm start
 ```
 
-Open http://localhost:4310 and choose **Try a scripted demo** to see a meeting without spending any credits. Set `PORT` if the default is busy. `npm restart` (or `./restart.sh`) restarts a server running in the background and logs to `data/server.log`. The server binds to all interfaces so other devices on your LAN can pair with it; set `MESH_HOST=127.0.0.1` to keep it to this machine.
+Open http://localhost:4310 and choose **Try a scripted demo** to see a meeting without spending any credits. Set `PORT` if the default is busy. `npm restart` (or `./restart.sh`) restarts a server running in the background and logs to `data/server.log`. The server binds to all interfaces so other devices on your LAN can pair with it; set `OVERRULE_HOST=127.0.0.1` to keep it to this machine.
 
 Optional host tools: `pdftotext` (poppler-utils) to read PDFs attached to a meeting, LibreOffice for old `.doc` and `.xls` files, Python 3.10+ to install [agentsec-pack](https://github.com/binary-knight/agentsec-pack) from inside the app for sandbox measurement.
 
@@ -84,7 +84,7 @@ Open **LAN access** on the host to see its addresses and a pairing code, then en
 
 - Everything is stored under `data/`: meetings, encrypted keys and their key file, attachments, measurements. Keep that directory private and back it up as a whole.
 - Prompts, contributions, and anything members read from a workspace or document go to the providers of the members you selected.
-- Child processes get a minimal environment; provider keys from the server's environment never reach a member unless you list them in `MESH_CLI_ENV_PASSTHROUGH`.
+- Child processes get a minimal environment; provider keys from the server's environment never reach a member unless you list them in `OVERRULE_CLI_ENV_PASSTHROUGH`.
 - The thread each turn reads keeps the brief and the openings in full, the last six floor turns in full, and reduces older turns to their structured fields. Long meetings with many members can exceed a model's context window.
 
 ## Documentation

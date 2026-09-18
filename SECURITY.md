@@ -1,6 +1,6 @@
 # Security policy
 
-Model Mesh runs code chosen by language models on the machine that hosts it, with whatever access its owner grants. Please read the trust model before reporting, because several things that look like vulnerabilities are deliberate and documented.
+Overrule runs code chosen by language models on the machine that hosts it, with whatever access its owner grants. Please read the trust model before reporting, because several things that look like vulnerabilities are deliberate and documented.
 
 ## Trust model
 
