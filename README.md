@@ -97,6 +97,8 @@ node bin/overrule.mjs review . --playbook changes --json || echo "the council ob
 
 `npm link` puts it on the path as `overrule`. `OVERRULE_URL` points it at another machine, and `--code` pairs with that machine's pairing code.
 
+[AGENTS.md](AGENTS.md) tells an agent how to use the council for its own work and what not to do unattended; [docs/agent-prompt.md](docs/agent-prompt.md) has prompts to paste into one.
+
 ## Reviewing a repository
 
 Paste a repository address in the Workspace section and press **Clone and attach**. The clone is shallow, lands in `~/overrule-repos` (set `OVERRULE_REPO_DIR` to move it), and is attached read-only. Cloning the same repository again refreshes that checkout in place. Only `https` addresses are accepted, so nothing reaches for this machine's ssh keys or a local path, and git is never allowed to ask for a password: a private repository fails quickly unless git is already signed in on the host.

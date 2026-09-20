@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +46,22 @@ test('the command line parses its arguments, including repeats, equals form, and
   assert.equal(options['deep-research'], true); assert.equal(options.cycles, '3'); assert.equal(options.json, true);
   assert.equal(parseArgs(['ask', 'x', '--quiet=false']).quiet, false);
   assert.throws(() => parseArgs(['ask', '--playbook']), /--playbook needs a value/);
+});
+
+test('the agent instructions and prompts only use commands and options the tool has', async () => {
+  const usage = (await run(process.execPath, [CLI, '--help'])).stdout;
+  // Only the agent-facing files: the README describes other tools' flags as well.
+  const docs = await Promise.all(['AGENTS.md', 'docs/agent-prompt.md'].map(name => readFile(join(dirname(fileURLToPath(import.meta.url)), '..', name), 'utf8')));
+  const text = docs.join('\n');
+  const commands = [...text.matchAll(/overrule(?:\.mjs)? ([a-z-]+)/g)].map(m => m[1]).filter(name => !['playbooks'].includes(name));
+  for (const command of new Set(commands)) assert.match(usage, new RegExp(`overrule ${command}\\b`), `documented command "${command}" is not in the usage`);
+  const flags = [...text.matchAll(/--[a-z][a-z-]+/g)].map(m => m[0]);
+  for (const flag of new Set(flags)) assert.ok(usage.includes(flag), `documented option "${flag}" is not in the usage`);
+  // The exit statuses the instructions promise are the ones the tool actually uses.
+  for (const line of ['0 approved', '2 objections remain', '3 checks failed', '4 verification incomplete']) assert.ok(usage.includes(line), line);
+  const agents = docs[0];
+  assert.match(agents, /Never pass `--level workspace-write`|Never pass `--acknowledge`/);
+  assert.match(docs[1], /```\n[\s\S]*overrule/, 'the prompt file has no copy-paste block');
 });
 
 test('overrule ask holds a meeting and reports its verdict, and --json is machine readable', async t => {
