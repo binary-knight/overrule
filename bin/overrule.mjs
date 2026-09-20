@@ -4,6 +4,7 @@
 import { readFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { buildPlaybook, PLAYBOOKS } from '../public/playbooks.js';
+import { assessResult } from '../public/meeting-state.js';
 
 const DEFAULT_URL = process.env.OVERRULE_URL || 'http://127.0.0.1:4310';
 const USAGE = `overrule — convene a council of models from the command line.
@@ -164,17 +165,20 @@ async function waitFor(client, id, log) {
 
 // Everything a calling agent would otherwise have to scrape out of the Markdown: the ballots, the objections with the
 // condition that resolves each one, the candidate text, and why the meeting closed.
-function machineReadable(run, url) {
+export function machineReadable(run, url) {
   const record = run.record || {};
+  // Judge the log rather than the stored record: a meeting decided by an older version carries that version's verdict, and the
+  // browser already recomputes. A caller should not see one answer here and another on screen.
+  const live = run.entries?.length ? assessResult(run) : null;
   const draft = [...(run.entries || [])].reverse().find(e => e.phase === 'draft' && e.status === 'complete' && !e.superseded && e.candidateVersion === run.candidateVersion);
   const name = id => (run.participants || []).find(p => p.id === id)?.name || id;
   return {
     id: run.id, status: run.status, url: `${url}/#${run.id}`,
-    verdict: record.verdict ? { ...record.verdict, votes: record.votes || null, voters: record.voters ?? null, missingBallots: record.missingBallots ?? null } : null,
+    verdict: live ? { code: live.code, label: live.label, verification: live.verification, dissent: live.dissent, stopReason: live.stopReason, votes: live.votes, voters: live.voters, missingBallots: live.missingBallots } : record.verdict || null,
     stopReason: run.stopReason || null, cycles: run.cycles, session: run.session || 1,
     final: run.final || '', candidate: draft?.text || '', candidateVersion: run.candidateVersion,
     ballots: (run.entries || []).filter(e => e.phase === 'ratify' && e.status === 'complete' && !e.superseded && e.candidateVersion === run.candidateVersion)
-      .map(e => ({ member: e.name, vote: e.fields?.vote || 'abstain', reason: e.fields?.reason || '', objections: (e.fields?.objections || []).map(o => ({ claim: o.claim, resolvingCondition: o.condition })) })),
+      .map(e => ({ member: e.name || name(e.speaker), vote: e.fields?.vote || 'abstain', reason: e.fields?.reason || '', objections: (e.fields?.objections || []).map(o => ({ claim: o.claim, resolvingCondition: o.condition })) })),
     objections: (run.issues || []).map(issue => ({ id: issue.id, raisedBy: name(issue.raisedBy), against: name(issue.against), claim: issue.claim, resolvingCondition: issue.condition, status: issue.status })),
     openObjections: (run.issues || []).filter(i => i.status === 'open').length,
     members: (run.participants || []).map(p => p.name), drafter: name(run.drafterId),
@@ -184,8 +188,8 @@ function machineReadable(run, url) {
   };
 }
 
-function report(run) {
-  const verdict = run.record?.verdict;
+function report(run, assessed) {
+  const verdict = assessed?.verdict || run.record?.verdict;
   return [
     `# ${verdict?.label || run.status}${run.workspace ? ` — ${run.workspace.name}` : ''}`,
     verdict?.verification || '',
@@ -230,17 +234,18 @@ export async function main(argv, { out = console.log, err = console.error } = {}
     }
     log(`${command === 'resume' ? 'Resumed' : 'Reconvened'} ${found.id.slice(0, 8)}.`);
     if (options['no-wait']) { out(options.json ? JSON.stringify({ id: found.id, status: 'running' }, null, 2) : found.id); return 0; }
-    const finished = await waitFor(client, found.id, log);
-    out(options.json ? JSON.stringify(machineReadable(finished, client.url), null, 2) : report(finished));
-    return VERDICT_EXIT[finished.record?.verdict?.code] ?? (finished.status === 'complete' ? 0 : 1);
+    const finished = await waitFor(client, found.id, log), result = machineReadable(finished, client.url);
+    out(options.json ? JSON.stringify(result, null, 2) : report(finished, result));
+    return VERDICT_EXIT[result.verdict?.code] ?? (finished.status === 'complete' ? 0 : 1);
   }
   if (command === 'show' || command === 'watch') {
     const id = options._[1] || fail(`overrule ${command} needs a meeting id.`);
     await client.connect();
     const found = (await client.call('/api/runs')).find(run => run.id === id || run.id.startsWith(id)) || fail(`No meeting starts with ${id}.`);
     const run = command === 'watch' ? await waitFor(client, found.id, log) : await client.call(`/api/runs/${found.id}`);
-    out(options.json ? JSON.stringify(machineReadable(run, client.url), null, 2) : report(run));
-    return VERDICT_EXIT[run.record?.verdict?.code] ?? (run.status === 'complete' ? 0 : 1);
+    const shown = machineReadable(run, client.url);
+    out(options.json ? JSON.stringify(shown, null, 2) : report(run, shown));
+    return VERDICT_EXIT[shown.verdict?.code] ?? (run.status === 'complete' ? 0 : 1);
   }
   if (command !== 'ask' && command !== 'review') fail(`Unknown command "${command}". Run overrule --help.`);
 
@@ -273,9 +278,9 @@ export async function main(argv, { out = console.log, err = console.error } = {}
   });
   log(`Meeting ${run.id.slice(0, 8)} started. Watch it at ${client.url}`);
   if (options['no-wait']) { out(options.json ? JSON.stringify({ id: run.id, status: run.status }, null, 2) : run.id); return 0; }
-  const finished = await waitFor(client, run.id, log);
-  out(options.json ? JSON.stringify(machineReadable(finished, client.url), null, 2) : report(finished));
-  return VERDICT_EXIT[finished.record?.verdict?.code] ?? (finished.status === 'complete' ? 0 : 1);
+  const finished = await waitFor(client, run.id, log), result = machineReadable(finished, client.url);
+  out(options.json ? JSON.stringify(result, null, 2) : report(finished, result));
+  return VERDICT_EXIT[result.verdict?.code] ?? (finished.status === 'complete' ? 0 : 1);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

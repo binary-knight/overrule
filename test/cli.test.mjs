@@ -8,7 +8,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../server.mjs';
 import { git } from '../lib/workspace.mjs';
-import { parseArgs } from '../bin/overrule.mjs';
+import { parseArgs, machineReadable } from '../bin/overrule.mjs';
 
 const run = promisify(execFile);
 const CLI = join(dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'overrule.mjs');
@@ -62,6 +62,28 @@ test('the agent instructions and prompts only use commands and options the tool 
   const agents = docs[0];
   assert.match(agents, /Never pass `--level workspace-write`|Never pass `--acknowledge`/);
   assert.match(docs[1], /```\n[\s\S]*overrule/, 'the prompt file has no copy-paste block');
+});
+
+test('a meeting decided by an older version is judged again, so the report and the screen agree', () => {
+  // The stored record says "objections" because that is what this app used to call a budget close with an open floor objection.
+  const legacy = {
+    id: 'aaaa', status: 'complete', stopReason: 'budget', candidateVersion: 1, cycles: 1,
+    participants: [{ id: 'a', name: 'Codex' }, { id: 'b', name: 'Claude Code' }], drafterId: 'a',
+    issues: [{ id: 'o1', raisedBy: 'a', against: 'b', claim: 'ambiguous', condition: 'name the check', status: 'open' }],
+    entries: [
+      { id: 'e1', speaker: 'a', phase: 'opening', status: 'complete' }, { id: 'e2', speaker: 'b', phase: 'opening', status: 'complete' },
+      { id: 'e3', speaker: 'a', phase: 'draft', status: 'complete', candidateVersion: 1, text: 'The sentence stands.', fields: { unresolved: [] } },
+      { id: 'e4', speaker: 'b', phase: 'ratify', status: 'complete', candidateVersion: 1, fields: { vote: 'approve', reason: 'fine', objections: [] } },
+    ],
+    record: { verdict: { code: 'objections', label: 'Objections remain', verification: 'none' } },
+    final: 'The sentence stands.',
+  };
+  const shown = machineReadable(legacy, 'http://x');
+  assert.equal(shown.verdict.code, 'unsettled'); assert.equal(shown.verdict.dissent, false); assert.equal(shown.verdict.stopReason, 'budget');
+  assert.equal(shown.objections[0].raisedBy, 'Codex'); assert.equal(shown.objections[0].against, 'Claude Code');
+  assert.equal(shown.objections[0].resolvingCondition, 'name the check'); assert.equal(shown.openObjections, 1);
+  assert.equal(shown.ballots[0].member, 'Claude Code'); assert.equal(shown.ballots[0].vote, 'approve');
+  assert.equal(shown.candidate, 'The sentence stands.'); assert.deepEqual(shown.members, ['Codex', 'Claude Code']); assert.equal(shown.drafter, 'Codex');
 });
 
 test('overrule ask holds a meeting and reports its verdict, and --json is machine readable', async t => {
