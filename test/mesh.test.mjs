@@ -195,9 +195,14 @@ test('research mode gives the web to the members that can reach it, and to nobod
   // Claude Code: no tools at all without research, search and fetch when talking, and no fetch under a read-only workspace.
   const tools = args => args[args.indexOf('--tools') + 1];
   assert.equal(tools(claudeArgs({})), ''); assert.equal(tools(claudeArgs({ research: true })), 'WebSearch,WebFetch');
+  // Naming the tools is not enough: this permission mode denies anything that would otherwise ask, so they must be allowed too.
+  const talking = claudeArgs({ research: true });
+  assert.equal(talking.slice(talking.indexOf('--allowedTools') + 1, talking.indexOf('--allowedTools') + 3).join(' '), 'WebSearch WebFetch');
   const readOnly = claudeArgs({ research: true, cwd: '/w', level: 'read-only' });
-  assert.ok(!readOnly.includes('WebSearch'), 'web search stays available under read-only');
-  assert.ok(claudeArgs({ cwd: '/w', level: 'read-only' }).includes('WebSearch'), 'web search is disallowed without research');
+  assert.ok(readOnly.includes('--allowedTools') && readOnly.includes('WebSearch'));
+  assert.ok(!readOnly.slice(readOnly.indexOf('--disallowedTools'), readOnly.indexOf('--allowedTools')).includes('WebSearch'), 'web search is still disallowed under read-only');
+  const plainReadOnly = claudeArgs({ cwd: '/w', level: 'read-only' });
+  assert.ok(plainReadOnly.includes('WebSearch') && !plainReadOnly.includes('--allowedTools'), 'web search is allowed without research');
   const writing = claudeArgs({ research: true, cwd: '/w', level: 'workspace-write', sandboxed: false });
   assert.ok(writing.includes('WebFetch') && !writing.includes('--disallowedTools'));
   // API members: the two that host a search tool get one; the rest are told they cannot browse.

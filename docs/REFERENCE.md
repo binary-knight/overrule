@@ -114,7 +114,7 @@ Capability differs by member, and the **ACCESS THIS TURN** section names it per 
 | Member | With research on |
 | --- | --- |
 | Codex | Live web search through Codex's own provider, at every access level, because the search runs outside the sandboxed shell (`web_search="live"`). |
-| Claude Code | Web search and page fetch when talking or at a write level; at read-only its restricted mode removes page fetch, so it searches only. Under the Claude Code sandbox with the network off, a page fetch fails while search still works. |
+| Claude Code | Web search and page fetch when talking or at a write level; at read-only its restricted mode removes page fetch, so it searches only. The tools are both named and explicitly allowed, because the permission mode the app uses denies anything that would otherwise ask. Under the Claude Code sandbox with the network off, a page fetch fails while search still works. |
 | OpenAI API | The Responses API `web_search` tool. |
 | Anthropic API | The Messages API server-side search tool, at the version the model takes. |
 | Gemini, Grok, Hugging Face, OpenAI-compatible | No browsing. They are told to rely on what others quote. |
