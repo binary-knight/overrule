@@ -324,25 +324,66 @@ test('changed settings send a verified candidate back for checking, and the floo
   assert.throws(() => mesh.applySettings(run, { cycles: 9 }), /1–8 cycles/);
 });
 
-test('research mode reaches every call, is recorded with the meeting, and can be switched on after a stop', async t => {
+test('internet research and deep research are separate, reach every call, and can be changed after a pause', async t => {
   const store = new Store(await mkdtemp(join(tmpdir(), 'mesh-research-'))); t.after(() => rm(store.directory, { recursive: true, force: true }));
   const calls = [];
-  const mesh = new Mesh(store, async (provider, request) => { calls.push({ name: provider.name, research: request.research, system: request.system, prompt: request.prompt }); return { text: reply(phaseOf(request.prompt)) }; });
+  const mesh = new Mesh(store, async (provider, request) => { calls.push({ name: provider.name, research: request.research, deepResearch: request.deepResearch, system: request.system, prompt: request.prompt }); return { text: reply(phaseOf(request.prompt)) }; });
   const plain = mesh.create({ ...options }); await finished(mesh, plain);
-  assert.equal(plain.research, false);
+  assert.equal(plain.research, false); assert.equal(plain.deepResearch, false);
   assert.ok(calls.every(c => c.research === undefined), 'a plain meeting asked for research');
-  assert.doesNotMatch(calls[0].system, /Research mode/);
+  assert.doesNotMatch(calls[0].system, /research is on/);
   calls.length = 0;
-  const run = mesh.create({ ...options, research: true }); await finished(mesh, run);
-  assert.equal(run.status, 'complete'); assert.equal(run.research, true);
-  assert.ok(calls.length >= 4 && calls.every(c => c.research === true), 'research did not reach every call');
-  assert.match(calls[0].system, /Research mode is on: members who can browse should search/);
-  assert.match(calls[0].prompt, /Search for the current state of the subject before you write/);
+  // Internet research alone: members may search, but nobody is told to research before speaking.
+  const web = mesh.create({ ...options, research: true }); await finished(mesh, web);
+  assert.equal(web.research, true); assert.equal(web.deepResearch, false);
+  assert.ok(calls.every(c => c.research === true && c.deepResearch === false), 'the web setting did not reach every call');
+  assert.match(calls[0].system, /Internet research is on: members who can browse may search/);
+  assert.doesNotMatch(calls[0].system, /Deep research is on/);
+  assert.match(calls[0].prompt, /Search the web where it bears on the question/);
+  calls.length = 0;
+  // Deep research implies the web and adds the research-first instruction.
+  const run = mesh.create({ ...options, deepResearch: true }); await finished(mesh, run);
+  assert.equal(run.status, 'complete'); assert.equal(run.research, true); assert.equal(run.deepResearch, true);
+  assert.ok(calls.length >= 4 && calls.every(c => c.research === true && c.deepResearch === true), 'deep research did not reach every call');
+  assert.match(calls[0].system, /Deep research is on: search before you take a position/);
+  assert.match(calls[0].prompt, /Research the subject before you write: several independent sources/);
+  assert.throws(() => mesh.applySettings(run, { research: false, deepResearch: true }), /Deep research needs internet research/);
   // The owner can also switch it on mid-meeting; the change is recorded like any other.
   run.status = 'cancelled'; calls.length = 0;
-  mesh.resume(run, options.participants, {}, { research: false });
-  assert.match(run.entries.filter(e => e.speaker === 'owner').at(-1).text, /research mode off: no member may search the web/);
+  mesh.resume(run, options.participants, {}, { research: false, deepResearch: false });
+  const note = run.entries.filter(e => e.speaker === 'owner').at(-1).text;
+  assert.match(note, /internet research off: no member may search the web/); assert.match(note, /deep research off/);
   await finished(mesh, run);
-  assert.equal(run.research, false);
+  assert.equal(run.research, false); assert.equal(run.deepResearch, false);
   assert.ok(calls.every(c => c.research === undefined));
+});
+
+test('pause stops between steps, keeps the call in flight, and resumes under new settings', async t => {
+  const store = new Store(await mkdtemp(join(tmpdir(), 'mesh-pause-'))); t.after(() => rm(store.directory, { recursive: true, force: true }));
+  const calls = []; const held = {};
+  const mesh = new Mesh(store, async (provider, request) => {
+    calls.push({ name: provider.name, phase: phaseOf(request.prompt), research: request.research });
+    // Pause while a floor turn is in flight: that call must still be recorded in full.
+    if (calls.length === 3 && held.run) { mesh.pause(held.run); await delay(30); }
+    return { text: reply(phaseOf(request.prompt)) };
+  });
+  const run = mesh.create({ ...options, cycles: 2 });
+  held.run = run;
+  await finished(mesh, run);
+  assert.equal(run.status, 'paused');
+  assert.match(run.error, /Paused by the owner/);
+  assert.equal(run.pauseRequested, undefined);
+  assert.equal(run.entries.filter(e => e.phase === 'opening' && e.status === 'complete').length, 2);
+  assert.equal(run.entries.filter(e => e.phase === 'floor' && e.status === 'complete').length, 1, 'the call in flight was thrown away');
+  assert.equal(run.entries.some(e => e.status === 'cancelled' || e.status === 'failed'), false);
+  assert.throws(() => mesh.pause(run), /not in session/);
+  const used = calls.length;
+  mesh.resume(run, options.participants, {}, { deepResearch: true, note: 'Research it properly now.' });
+  await finished(mesh, run);
+  assert.equal(run.status, 'complete', run.error);
+  assert.equal(run.research, true); assert.equal(run.deepResearch, true);
+  assert.ok(calls.slice(used).every(c => c.research === true), 'the resumed meeting did not get the new setting');
+  const owner = run.entries.filter(e => e.speaker === 'owner').at(-1);
+  assert.match(owner.text, /internet research on: members may search the web/); assert.match(owner.text, /Research it properly now\./);
+  assert.equal(run.record.verdict.code, 'approved');
 });

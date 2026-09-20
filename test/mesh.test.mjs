@@ -311,7 +311,7 @@ test('a failed drafter can be retried without repeating the floor, and an interr
   const mesh = new Mesh(store, call);
   const run = mesh.create({ ...options, cycles: 1 }); await finished(mesh, run);
   assert.equal(run.status, 'failed'); assert.match(run.error, /drafter could not/); assert.equal(calls.length, 5);
-  assert.throws(() => mesh.resume({ ...run, status: 'complete' }, participants), /Only a failed/);
+  assert.throws(() => mesh.resume({ ...run, status: 'complete' }, participants), /Only a paused, failed/);
   mesh.resume(run, participants); await finished(mesh, run);
   assert.equal(run.status, 'complete', run.error); assert.equal(calls.length, 7);
   assert.deepEqual(calls.slice(5).map(c => c.phase), ['draft', 'ratify']);
@@ -801,9 +801,13 @@ test('the prompt states each member’s real access for the turn, and the budget
   assert.match(researching, /- Codex: reads files and runs commands in a read-only sandbox; cannot write files; searches the web through Codex\./);
   assert.match(researching, /- Claude Code: .*; searches the web but cannot fetch a page directly\./);
   assert.match(researching, /- Sol: no file tools; cannot browse; it relies on what others quote\./);
-  assert.match(researching, /Research mode is on: cite every external fact with its source and date/);
-  assert.match(rulesFor({ research: true }), /Research mode is on: members who can browse should search/);
-  assert.doesNotMatch(rulesFor({}), /Research mode/);
+  assert.match(researching, /Internet research is on: cite every external fact with its source and date\./);
+  assert.doesNotMatch(researching, /Deep research is on/);
+  assert.match(access({ ...base, research: true, deepResearch: true }), /Deep research is on: research first, use several independent sources/);
+  assert.match(rulesFor({ research: true }), /Internet research is on: members who can browse may search/);
+  assert.doesNotMatch(rulesFor({ research: true }), /Deep research is on/);
+  assert.match(rulesFor({ research: true, deepResearch: true }), /Deep research is on: search before you take a position/);
+  assert.doesNotMatch(rulesFor({}), /research is on/);
   // Session scoping: eight session-1 turns do not exhaust a one-cycle session 2.
   const turn = (speaker, seq, session, stance = 'agree') => ({ id: `e${seq}`, seq, speaker, name: speaker, phase: 'floor', cycle: 1, session, status: 'complete', fields: { stance, concedes: [], objections: [], resolves: [], openPoints: [] } });
   const openings = participants.map((p, i) => ({ id: `e${i}`, seq: i, speaker: p.id, name: p.name, phase: 'opening', status: 'complete', session: 1, fields: {} }));

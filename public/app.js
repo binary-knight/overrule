@@ -8,7 +8,7 @@ const colors = { 'codex-cli': 'mint', 'claude-cli': 'peach', openai: 'mint', ant
 function toast(message) { $('toast').textContent = message; $('toast').classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').classList.add('hidden'), 6000); }
 // The draft lives in this browser only, so an expired pairing or a server restart never costs a half-written brief.
 const DRAFT_KEY = 'mesh-draft';
-function saveDraft() { try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ prompt: $('prompt').value, rounds: $('rounds').value, revisions: $('revisions').value, research: $('research').checked, maxCalls: $('max-calls').value, duration: $('duration').value, synthesizer: $('synthesizer').value, selected: [...state.selected], maxTokens: $('max-tokens').value, timeout: $('timeout').value, workspacePath: $('workspace-path').value, workspaceChecks: $('workspace-checks').value })); } catch {} }
+function saveDraft() { try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ prompt: $('prompt').value, rounds: $('rounds').value, revisions: $('revisions').value, research: $('research').checked, deepResearch: $('deep-research').checked, maxCalls: $('max-calls').value, duration: $('duration').value, synthesizer: $('synthesizer').value, selected: [...state.selected], maxTokens: $('max-tokens').value, timeout: $('timeout').value, workspacePath: $('workspace-path').value, workspaceChecks: $('workspace-checks').value })); } catch {} }
 function readDraft() { try { return JSON.parse(localStorage.getItem(DRAFT_KEY)) || {}; } catch { return {}; } }
 async function api(path, method = 'GET', data, retried = false) {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', 'X-Mesh-Token': state.token || '' }, ...(data !== undefined ? { body: JSON.stringify(data) } : {}) });
@@ -341,12 +341,14 @@ function renderRun(run) {
   $('run-label').textContent = run.demo ? 'Scripted demo. No model calls.' : '';
   const titles = { opening: 'Members are writing their positions.', floor: 'The council has the floor.', draft: 'The drafter is writing the candidate.', check: 'Checking the candidate before voting.', ratify: 'Members are voting on the candidate.', propose: 'Independent ideas are taking shape.', review: 'The council is comparing notes.', synthesize: 'Bringing the best ideas together.' };
   const result = assessResult(run);
-  $('run-title').textContent = run.status === 'complete' ? (meeting ? result.label : 'The discussion is complete.') : run.status === 'limited' ? 'Session limit reached.' : run.status === 'running' ? (titles[run.phase] || 'The council is thinking.') : `${meeting ? 'Meeting' : 'Discussion'} ${run.status}.`;
+  $('run-title').textContent = run.status === 'complete' ? (meeting ? result.label : 'The discussion is complete.') : run.status === 'limited' ? 'Session limit reached.' : run.status === 'paused' ? 'Meeting paused.' : run.pauseRequested ? 'Pausing after this step.' : run.status === 'running' ? (titles[run.phase] || 'The council is thinking.') : `${meeting ? 'Meeting' : 'Discussion'} ${run.status}.`;
   $('floor-outcome').textContent = meeting && run.stopReason ? `Discussion closed: ${run.stopReason === 'budget' ? 'cycle budget reached' : run.stopReason}. Final candidate review is shown separately.` : '';
   $('run-prompt').textContent = run.prompt;
   $('cancel').classList.toggle('hidden', run.status !== 'running'); $('cancel').disabled = false;
+  $('pause').classList.toggle('hidden', run.status !== 'running'); $('pause').disabled = Boolean(run.pauseRequested);
+  $('pause').textContent = run.pauseRequested ? 'Pausing after this step' : 'Pause';
   const remaining = Math.max(0, (run.budget?.maxCalls || run.plannedCalls) - callsUsed(run));
-  const stopped = meeting && ['failed', 'interrupted', 'cancelled', 'limited'].includes(run.status);
+  const stopped = meeting && ['failed', 'interrupted', 'cancelled', 'limited', 'paused'].includes(run.status);
   const needsLimits = stopped && (run.status === 'limited' || (run.budget && (callsUsed(run) >= run.budget.maxCalls || elapsedBudget(run) >= run.budget.maxDurationSeconds * 1000)));
   $('resume').classList.toggle('hidden', !stopped || needsLimits); $('resume').disabled = false;
   $('resume').textContent = run.phase === 'check' ? 'Retry candidate checks' : run.phase === 'draft' && run.stopReason ? 'Resume candidate preparation' : `Resume meeting (up to ${remaining} call${remaining === 1 ? '' : 's'})`;
@@ -361,7 +363,7 @@ function renderRun(run) {
   }
   $('run-workspace').classList.toggle('hidden', !ws && !run.research);
   $('run-workspace').classList.toggle('start-blocker', ws?.level === 'full-access');
-  const research = run.research ? 'Research mode on: members may search the web' : '';
+  const research = run.research ? `Internet research on${run.deepResearch ? ', deep research on' : ''}: members may search the web` : '';
   if (!ws && run.research) $('run-workspace').textContent = research + '.';
   if (ws) $('run-workspace').textContent = [`Workspace ${ws.name}, ${ws.level === 'full-access' ? 'full access' : ws.level}`, ws.attachedFrom && ws.attachedFrom !== 'localhost' ? `attached from ${ws.attachedFrom}` : '', ws.branch ? `branch ${ws.branch}` : '', ws.network ? 'network on' : '', ws.applied ? `applied into ${ws.applied.into} at ${new Date(ws.applied.at).toLocaleTimeString()}` : ws.discarded ? 'branch discarded' : '', ws.measurement ? `blast radius ${ws.measurement.score ?? '?'} of 100` : '', (ws.canary?.detail || '').replace(/\.$/, ''), research].filter(Boolean).join('. ') + '.';
   const candidate = ws && [...run.entries].reverse().find(e => e.phase === 'draft' && e.status === 'complete' && !e.superseded && e.candidateVersion === run.candidateVersion && e.candidate)?.candidate;
@@ -409,7 +411,7 @@ function fillAdjustForm(run) {
     $('adjust-timeout').value = ws.implementTimeout || 900;
     adjustLevelChanged();
   }
-  $('adjust-research').checked = run.research === true;
+  $('adjust-research').checked = run.research === true; $('adjust-deep-research').checked = run.deepResearch === true;
   $('adjust-cycles').value = String(run.cycles); $('adjust-revisions').value = String(run.maxRevisions ?? 1);
   $('adjust-cycles-hint').classList.toggle('hidden', run.stopReason !== 'budget');
   if (run.budget) { $('resume-max-calls').value = run.budget.maxCalls; $('resume-duration').value = Math.ceil(run.budget.maxDurationSeconds / 60); }
@@ -426,6 +428,12 @@ function adjustLevelChanged() {
   if (level === 'read-only') $('adjust-network').checked = false;
 }
 document.querySelectorAll('input[name=adjust-level]').forEach(input => input.onchange = adjustLevelChanged);
+// Deep research needs the web: ticking it turns internet research on, and turning that off turns deep research off with it.
+function linkResearch(web, deep) {
+  $(deep).onchange = () => { if ($(deep).checked) $(web).checked = true; saveDraft(); };
+  $(web).onchange = () => { if (!$(web).checked) $(deep).checked = false; saveDraft(); };
+}
+linkResearch('research', 'deep-research'); linkResearch('adjust-research', 'adjust-deep-research');
 function watchRun(run) {
   events?.close(); renderRun(run); selectTab(['complete', 'limited'].includes(run.status) ? 'answer' : 'transcript');
   if (run.status !== 'running') return;
@@ -447,7 +455,7 @@ async function startRun(demo = false) {
   if (!demo && (state.attachments || []).some(a => a.uploading)) return toast('Wait for the documents to finish uploading.');
   $('start').disabled = true; $('demo').disabled = true;
   try {
-    const run = await api('/api/runs', 'POST', { prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), revisions: Number($('revisions')?.value ?? 1), research: !demo && $('research').checked, maxCalls: demo || !$('max-calls').value ? undefined : Number($('max-calls').value), maxDurationSeconds: demo ? 3600 : Number($('duration').value) * 60, demo, workspace: demo ? undefined : workspacePayload(), attachmentIds: demo ? undefined : (state.attachments || []).filter(a => a.id).map(a => a.id) });
+    const run = await api('/api/runs', 'POST', { prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), revisions: Number($('revisions')?.value ?? 1), research: !demo && $('research').checked, deepResearch: !demo && $('deep-research').checked, maxCalls: demo || !$('max-calls').value ? undefined : Number($('max-calls').value), maxDurationSeconds: demo ? 3600 : Number($('duration').value) * 60, demo, workspace: demo ? undefined : workspacePayload(), attachmentIds: demo ? undefined : (state.attachments || []).filter(a => a.id).map(a => a.id) });
     if (!demo && run.attachments?.length) { state.attachments = []; renderAttachments(); }
     showPage('workspace'); watchRun(run); await refreshHistory(); $('discussion').scrollIntoView({ behavior: 'smooth', block: 'start' });
     if (!demo && run.workspace) api('/api/workspace').then(config => { state.workspaceConfig = config; workspaceSetup(); }).catch(() => {}); // the workspace just became a recent
@@ -620,7 +628,7 @@ $('limit-form').addEventListener('submit', async event => {
   const ws = currentRun.workspace;
   const payload = {
     maxCalls: Number($('resume-max-calls').value), maxDurationSeconds: Number($('resume-duration').value) * 60,
-    cycles: Number($('adjust-cycles').value), revisions: Number($('adjust-revisions').value), research: $('adjust-research').checked, note: $('adjust-note').value.trim(),
+    cycles: Number($('adjust-cycles').value), revisions: Number($('adjust-revisions').value), research: $('adjust-research').checked, deepResearch: $('adjust-deep-research').checked, note: $('adjust-note').value.trim(),
   };
   if (ws) payload.workspace = {
     level: adjustLevel(), network: $('adjust-network').checked, claudeSandbox: $('adjust-claude-sandbox').checked,
@@ -633,6 +641,11 @@ $('limit-form').addEventListener('submit', async event => {
 document.querySelectorAll('[data-example]').forEach(button => button.onclick = () => { $('prompt').value = button.dataset.example; $('prompt').dispatchEvent(new Event('input')); $('prompt').focus(); });
 document.querySelectorAll('[data-tab]').forEach(button => button.onclick = () => selectTab(button.dataset.tab));
 $('start').onclick = () => startRun(); $('demo').onclick = () => startRun(true);
+$('pause').onclick = async () => {
+  $('pause').disabled = true;
+  try { await api(`/api/runs/${currentRun.id}/pause`, 'POST'); toast('Pausing after the step in flight. Nothing is thrown away.'); }
+  catch (error) { toast(error.message); $('pause').disabled = false; }
+};
 $('cancel').onclick = async () => { $('cancel').disabled = true; try { await api(`/api/runs/${currentRun.id}/cancel`, 'POST'); } catch (error) { toast(error.message); $('cancel').disabled = false; } };
 $('reuse').onclick = () => { const prompt = currentRun.prompt; newDiscussion(); $('prompt').value = prompt; $('prompt').dispatchEvent(new Event('input')); };
 (async () => {
@@ -643,7 +656,7 @@ $('reuse').onclick = () => { const prompt = currentRun.prompt; newDiscussion(); 
     const draft = readDraft(), restored = (draft.selected || []).filter(id => state.providers.some(p => p.id === id));
     state.selected = new Set(restored.length ? restored : state.providers.slice(0, 2).map(p => p.id));
     if (draft.prompt) $('prompt').value = draft.prompt;
-    $('research').checked = draft.research === true;
+    $('research').checked = draft.research === true; $('deep-research').checked = draft.deepResearch === true;
     for (const [id, value] of [['rounds', draft.rounds], ['revisions', draft.revisions], ['max-calls', draft.maxCalls], ['duration', draft.duration], ['max-tokens', draft.maxTokens], ['timeout', draft.timeout]]) if (value) $(id).value = value;
     renderProviders(); if (draft.synthesizer && state.selected.has(draft.synthesizer)) $('synthesizer').value = draft.synthesizer;
     if (draft.workspacePath) $('workspace-path').value = draft.workspacePath; if (draft.workspaceChecks) $('workspace-checks').value = draft.workspaceChecks;
