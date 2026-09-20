@@ -138,7 +138,11 @@ Drop files on the brief, press **Attach files**, or paste a copied file. This wo
 
 Defaults chosen for unattended use: every ready connection becomes a member, up to eight, with the first as drafter; a workspace is attached read-only; two cycles; one revision. `--members` and `--drafter` take the names you gave your connections. Warnings that the browser shows as checkboxes are accepted with `--acknowledge`, and full access additionally needs `--acknowledge-full-access`, which is refused otherwise.
 
-The exit status carries the verdict, so a calling agent can branch on it without parsing text: 0 approved, 2 objections remain, 3 checks failed, 4 verification incomplete, 1 anything that went wrong. `--json` prints `{ id, status, verdict, final, error, url }`. Progress goes to standard error, so `--json` output stays clean when piped.
+The exit status carries the verdict, so a calling agent can branch on it without parsing text: 0 approved, 2 objections remain, 3 checks failed, 4 verification incomplete, 5 unsettled, 1 anything that went wrong. **Objections and unsettled are different outcomes**: 2 means a member voted against the candidate, while 5 means the floor ran out of turns or stopped moving with nobody dissenting, which is a reason to buy more turns rather than to reject the result. `verdict` also carries `dissent`, `stopReason`, and the vote counts.
+
+`--json` prints the record, not a summary of it: `{ id, status, url, verdict, stopReason, cycles, session, final, candidate, candidateVersion, ballots[], objections[], openObjections, members[], drafter, workspace, research, deepResearch, metrics, error }`. Each objection carries its `resolvingCondition`, and each ballot its vote and reasons, so a caller can quote a dissent verbatim without scraping Markdown. Progress goes to standard error, so piped output stays clean, and nothing is written to standard output until the verdict.
+
+`resume <id>` picks up a stopped meeting, and also a meeting that finished on budget or as stalled when it is given more cycles than it had: the floor reopens on the same record, the next draft becomes a new candidate version, and the earlier ballots stay in the transcript. `reconvene <id> "<instruction>"` opens a new session instead. Both take the limit options and `--note`.
 
 ### Cloning a repository
 

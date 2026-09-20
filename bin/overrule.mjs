@@ -10,6 +10,8 @@ const USAGE = `overrule — convene a council of models from the command line.
 
   overrule ask "<brief>" [options]        Hold a meeting about a question.
   overrule review [path] [options]        Review a workspace, usually with a report template.
+  overrule resume <id> [options]          Pick a stopped meeting up, optionally with more turns.
+  overrule reconvene <id> "<what next>"   Reopen a closed meeting with a new instruction.
   overrule watch <id>                     Follow a meeting that is already running.
   overrule show <id> [--json]             Print a finished meeting's report.
   overrule list [--json]                  List recent meetings.
@@ -26,6 +28,8 @@ Options
   --research             Members that can browse may search the web.
   --deep-research        They research the subject before taking a position. Implies --research.
   --attach <file>        Attach a document. Repeatable.
+  --exclude <path>       Tell members a path is out of scope. Repeatable. An instruction to
+                         the council, not a boundary the machine enforces.
   --check <command>      A command run on the candidate commit at a write level. Repeatable.
   --network              Allow the network for the implementer and the checks at a write level.
   --implement-limit <s>  Seconds the implementer may take at a write level.
@@ -34,20 +38,23 @@ Options
   --call-limit <n>       Model calls the whole session may make.
   --acknowledge          Accept the warnings this meeting needs (secrets in the tree, uncommitted work).
   --acknowledge-full-access   Required for --level full-access.
+  --note <text>          A message to the council, delivered with resume.
   --no-wait              Print the meeting id and exit instead of waiting.
   --json                 Print one JSON object instead of a report.
   --quiet                Print the report only, with no progress.
   --url <address>        Server to use. Default ${DEFAULT_URL}.
   --code <pairing code>  Pair first; needed only when the server is not on this machine.
 
-Exit status: 0 approved, 2 objections remain, 3 checks failed, 4 verification incomplete, 1 error.`;
+Exit status: 0 approved, 2 objections remain (a member voted against), 3 checks failed,
+4 verification incomplete, 5 unsettled (out of turns or stalled, with nobody dissenting;
+resume with more cycles), 1 error.`;
 
-const VERDICT_EXIT = { approved: 0, objections: 2, 'checks-failed': 3, incomplete: 4 };
+const VERDICT_EXIT = { approved: 0, objections: 2, 'checks-failed': 3, incomplete: 4, unsettled: 5 };
 const FLAGS = new Set(['research', 'deep-research', 'network', 'json', 'quiet', 'no-wait', 'acknowledge', 'acknowledge-full-access', 'help', 'version']);
-const MANY = new Set(['attach', 'check']);
+const MANY = new Set(['attach', 'check', 'exclude']);
 
 export function parseArgs(argv) {
-  const options = { _: [], attach: [], check: [] };
+  const options = { _: [], attach: [], check: [], exclude: [] };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg.startsWith('--')) { options._.push(arg); continue; }
@@ -114,7 +121,7 @@ function chooseMembers(bootstrap, options) {
   chosen = chosen.slice(0, 8);
   const drafter = options.drafter ? chosen.find(p => p.name.toLowerCase() === options.drafter.toLowerCase() || p.id === options.drafter) : chosen[0];
   if (!drafter) fail(`The drafter "${options.drafter}" is not one of the members.`);
-  return { participantIds: chosen.map(p => p.id), drafterId: drafter.id, names: chosen.map(p => p.name) };
+  return { participantIds: chosen.map(p => p.id), drafterId: drafter.id, names: chosen.map(p => p.name), seats: chosen };
 }
 
 async function attachDocuments(client, files, log) {
@@ -137,7 +144,7 @@ function workspacePayload(options) {
   if (!level) return undefined;
   if (level === 'full-access' && !options['acknowledge-full-access']) fail('Full access needs --acknowledge-full-access: every member with tools can do anything your account can do on that machine.');
   return {
-    path, level, checks: options.check, network: options.network === true || level === 'full-access',
+    path, level, checks: options.check, exclude: options.exclude, network: options.network === true || level === 'full-access',
     acknowledgeSecrets: Boolean(options.acknowledge), acknowledgeDirty: Boolean(options.acknowledge), acknowledgeFullAccess: Boolean(options['acknowledge-full-access']),
     ...(options['implement-limit'] ? { implementTimeout: Number(options['implement-limit']) } : {}),
   };
@@ -153,6 +160,28 @@ async function waitFor(client, id, log) {
     if (line !== last) { log(line); last = line; }
     await new Promise(resolve => setTimeout(resolve, 2000));
   }
+}
+
+// Everything a calling agent would otherwise have to scrape out of the Markdown: the ballots, the objections with the
+// condition that resolves each one, the candidate text, and why the meeting closed.
+function machineReadable(run, url) {
+  const record = run.record || {};
+  const draft = [...(run.entries || [])].reverse().find(e => e.phase === 'draft' && e.status === 'complete' && !e.superseded && e.candidateVersion === run.candidateVersion);
+  const name = id => (run.participants || []).find(p => p.id === id)?.name || id;
+  return {
+    id: run.id, status: run.status, url: `${url}/#${run.id}`,
+    verdict: record.verdict ? { ...record.verdict, votes: record.votes || null, voters: record.voters ?? null, missingBallots: record.missingBallots ?? null } : null,
+    stopReason: run.stopReason || null, cycles: run.cycles, session: run.session || 1,
+    final: run.final || '', candidate: draft?.text || '', candidateVersion: run.candidateVersion,
+    ballots: (run.entries || []).filter(e => e.phase === 'ratify' && e.status === 'complete' && !e.superseded && e.candidateVersion === run.candidateVersion)
+      .map(e => ({ member: e.name, vote: e.fields?.vote || 'abstain', reason: e.fields?.reason || '', objections: (e.fields?.objections || []).map(o => ({ claim: o.claim, resolvingCondition: o.condition })) })),
+    objections: (run.issues || []).map(issue => ({ id: issue.id, raisedBy: name(issue.raisedBy), against: name(issue.against), claim: issue.claim, resolvingCondition: issue.condition, status: issue.status })),
+    openObjections: (run.issues || []).filter(i => i.status === 'open').length,
+    members: (run.participants || []).map(p => p.name), drafter: name(run.drafterId),
+    workspace: run.workspace ? { path: run.workspace.path, level: run.workspace.level, origin: run.workspace.origin || null, head: run.workspace.head || null } : null,
+    research: Boolean(run.research), deepResearch: Boolean(run.deepResearch),
+    metrics: record.metrics || null, error: run.error || null,
+  };
 }
 
 function report(run) {
@@ -181,12 +210,36 @@ export async function main(argv, { out = console.log, err = console.error } = {}
     for (const run of runs.slice(0, 20)) out(`${run.id.slice(0, 8)}  ${String(run.status).padEnd(11)} ${new Date(run.createdAt).toLocaleString()}  ${(run.prompt || '').replace(/\s+/g, ' ').slice(0, 70)}`);
     return 0;
   }
+  if (command === 'resume' || command === 'reconvene') {
+    const id = options._[1] || fail(`overrule ${command} needs a meeting id.`);
+    await client.connect();
+    const found = (await client.call('/api/runs')).find(run => run.id === id || run.id.startsWith(id)) || fail(`No meeting starts with ${id}.`);
+    const body = {
+      ...(options.cycles ? { cycles: number(options.cycles, 'cycles') } : {}),
+      ...(options.revisions === undefined ? {} : { revisions: number(options.revisions, 'revisions') }),
+      ...(options['turn-limit'] ? { timeoutSeconds: number(options['turn-limit'], 'turn-limit') } : {}),
+      ...(options['call-limit'] ? { maxCalls: number(options['call-limit'], 'call-limit') } : {}),
+      ...(options['time-limit'] ? { maxDurationSeconds: number(options['time-limit'], 'time-limit') * 60 } : {}),
+      ...(options.research || options['deep-research'] ? { research: true } : {}), ...(options['deep-research'] ? { deepResearch: true } : {}),
+    };
+    if (command === 'reconvene') {
+      const text = options._.slice(2).join(' ').trim() || options.note || fail('Say what the council should take up next: overrule reconvene <id> "…".');
+      await client.call(`/api/runs/${found.id}/reconvene`, 'POST', { text, cycles: body.cycles ?? 2, maxCalls: body.maxCalls, maxDurationSeconds: body.maxDurationSeconds });
+    } else {
+      await client.call(`/api/runs/${found.id}/resume`, 'POST', { ...body, note: options.note || '' });
+    }
+    log(`${command === 'resume' ? 'Resumed' : 'Reconvened'} ${found.id.slice(0, 8)}.`);
+    if (options['no-wait']) { out(options.json ? JSON.stringify({ id: found.id, status: 'running' }, null, 2) : found.id); return 0; }
+    const finished = await waitFor(client, found.id, log);
+    out(options.json ? JSON.stringify(machineReadable(finished, client.url), null, 2) : report(finished));
+    return VERDICT_EXIT[finished.record?.verdict?.code] ?? (finished.status === 'complete' ? 0 : 1);
+  }
   if (command === 'show' || command === 'watch') {
     const id = options._[1] || fail(`overrule ${command} needs a meeting id.`);
     await client.connect();
     const found = (await client.call('/api/runs')).find(run => run.id === id || run.id.startsWith(id)) || fail(`No meeting starts with ${id}.`);
     const run = command === 'watch' ? await waitFor(client, found.id, log) : await client.call(`/api/runs/${found.id}`);
-    out(options.json ? JSON.stringify({ id: run.id, status: run.status, verdict: run.record?.verdict || null, final: run.final || '', error: run.error || null }, null, 2) : report(run));
+    out(options.json ? JSON.stringify(machineReadable(run, client.url), null, 2) : report(run));
     return VERDICT_EXIT[run.record?.verdict?.code] ?? (run.status === 'complete' ? 0 : 1);
   }
   if (command !== 'ask' && command !== 'review') fail(`Unknown command "${command}". Run overrule --help.`);
@@ -205,9 +258,12 @@ export async function main(argv, { out = console.log, err = console.error } = {}
   if (!prompt.trim()) fail(command === 'review' ? 'Give a brief, or pick one with --playbook.' : 'Give a brief: overrule ask "your question".');
 
   const attachmentIds = options.attach.length ? await attachDocuments(client, options.attach, log) : [];
-  log(`Convening ${members.names.join(', ')}${workspace ? ` on ${workspace.path} (${workspace.level})` : ''}`);
+  const billed = members.seats.filter(p => !bootstrap.types[p.type]?.cli);
+  const seating = `Seating ${members.seats.map(p => `${p.name}${bootstrap.types[p.type]?.cli ? '' : ' (billed per token)'}`).join(', ')}${workspace ? ` on ${workspace.path} (${workspace.level})` : ''}`;
+  if (!options.quiet) err(seating + (billed.length && !options.members ? `\n${billed.length} of these bill your API accounts per token. Pass --members to choose the council yourself.` : ''));
+  const { seats, names, ...meeting } = members;
   const run = await client.call('/api/runs', 'POST', {
-    prompt, ...members, cycles: options.cycles ? number(options.cycles, 'cycles') : 2,
+    prompt, ...meeting, cycles: options.cycles ? number(options.cycles, 'cycles') : 2,
     revisions: options.revisions === undefined ? 1 : number(options.revisions, 'revisions'),
     research: Boolean(options.research) || Boolean(options['deep-research']), deepResearch: Boolean(options['deep-research']),
     ...(options['turn-limit'] ? { timeoutSeconds: number(options['turn-limit'], 'turn-limit') } : {}),
@@ -218,12 +274,13 @@ export async function main(argv, { out = console.log, err = console.error } = {}
   log(`Meeting ${run.id.slice(0, 8)} started. Watch it at ${client.url}`);
   if (options['no-wait']) { out(options.json ? JSON.stringify({ id: run.id, status: run.status }, null, 2) : run.id); return 0; }
   const finished = await waitFor(client, run.id, log);
-  out(options.json ? JSON.stringify({ id: finished.id, status: finished.status, verdict: finished.record?.verdict || null, final: finished.final || '', error: finished.error || null, url: `${client.url}/#${finished.id}` }, null, 2) : report(finished));
+  out(options.json ? JSON.stringify(machineReadable(finished, client.url), null, 2) : report(finished));
   return VERDICT_EXIT[finished.record?.verdict?.code] ?? (finished.status === 'complete' ? 0 : 1);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  // process.exit truncates a piped stdout: set the status and let the process end once the report has been written.
   main(process.argv.slice(2))
-    .then(code => process.exit(code))
-    .catch(error => { console.error(error.expected ? error.message : `overrule: ${error.stack}`); process.exit(1); });
+    .then(code => { process.exitCode = code; })
+    .catch(error => { console.error(error.expected ? error.message : `overrule: ${error.stack}`); process.exitCode = 1; });
 }

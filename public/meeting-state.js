@@ -44,10 +44,16 @@ export function assessResult(run) {
   const missingBallots = voters.length - ballots.length;
   const checks = candidate?.checks || [], openIssues = (run.issues || []).filter(i => i.status === 'open');
   const writeWorkspace = run.workspace && run.workspace.level !== 'read-only';
+  // A member voting against the candidate is dissent. A floor objection nobody answered before the budget ran out is not the
+  // same thing, and a caller that can buy more turns should be able to tell them apart without reading the prose.
+  const dissent = Boolean(votes.object);
+  const unsettled = !dissent && Boolean(openIssues.length || draft?.fields?.unresolved?.length) && ['budget', 'stalled'].includes(run.stopReason);
   let code = 'incomplete', label = 'Verification incomplete';
   if (checks.some(c => Number.isInteger(c.code) && c.code !== 0)) { code = 'checks-failed'; label = 'Checks failed'; }
-  else if (votes.object || openIssues.length || draft?.fields?.unresolved?.length) { code = 'objections'; label = 'Objections remain'; }
+  else if (dissent) { code = 'objections'; label = 'Objections remain'; }
+  else if (unsettled) { code = 'unsettled'; label = run.stopReason === 'stalled' ? 'Unsettled: the floor stopped moving' : 'Unsettled: the meeting ran out of turns'; }
+  else if (openIssues.length || draft?.fields?.unresolved?.length) { code = 'objections'; label = 'Objections remain'; }
   else if (draft && (!writeWorkspace || candidateReady(run, candidate)) && voters.length > 0 && !missingBallots && votes.approve === voters.length && run.status === 'complete') { code = 'approved'; label = 'Approved'; }
   const verification = !writeWorkspace || !(run.workspace.checks || []).length ? 'No independent automated checks; approval records model agreement.' : !candidateReady(run, candidate) ? 'Configured checks have not all finished.' : checks.some(c => c.code !== 0) ? 'Review the failing checks before applying.' : 'All configured checks passed on the recorded commit.';
-  return { code, label, verification, votes, voters: voters.length, missingBallots, ballots, draft, candidate, openIssues };
+  return { code, label, verification, dissent, stopReason: run.stopReason || null, votes, voters: voters.length, missingBallots, ballots, draft, candidate, openIssues };
 }

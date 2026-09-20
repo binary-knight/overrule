@@ -316,7 +316,7 @@ test('a failed drafter can be retried without repeating the floor, and an interr
   const mesh = new Mesh(store, call);
   const run = mesh.create({ ...options, cycles: 1 }); await finished(mesh, run);
   assert.equal(run.status, 'failed'); assert.match(run.error, /drafter could not/); assert.equal(calls.length, 5);
-  assert.throws(() => mesh.resume({ ...run, status: 'complete' }, participants), /Only a paused, failed/);
+  assert.throws(() => mesh.resume({ ...run, status: 'complete' }, participants), /finished \(consensus\)\. Give it more cycles|Only a paused, failed/);
   mesh.resume(run, participants); await finished(mesh, run);
   assert.equal(run.status, 'complete', run.error); assert.equal(calls.length, 7);
   assert.deepEqual(calls.slice(5).map(c => c.phase), ['draft', 'ratify']);

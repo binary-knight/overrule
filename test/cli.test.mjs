@@ -83,6 +83,41 @@ test('overrule ask holds a meeting and reports its verdict, and --json is machin
   assert.equal(shown.code, 0); assert.match(shown.stdout, /^# Approved/);
 });
 
+test('a meeting that runs out of turns is unsettled, not dissent, and resume finishes it', async t => {
+  // One cycle, an objection raised on the floor that nobody answers, and every ballot approving: the budget bound it, nobody dissented.
+  let objected = false;
+  const { url } = await serve(t, { providerCall: async (provider, request) => {
+    if (/Write your OPENING POSITION/.test(request.prompt)) return { text: 'Opening.' + block({ assumptions: [], risk: 'r', criteria: ['c'] }) };
+    if (/RATIFICATION BALLOT/.test(request.prompt)) return { text: 'Fine.' + block({ vote: 'approve', objections: [], reason: 'ok' }) };
+    if (/You are the drafter|IMPLEMENTER/.test(request.prompt)) return { text: 'The sentence stands.' + block({ version: 1, unresolved: [] }) };
+    if (!objected) { objected = true; return { text: 'One worry.' + block({ stance: 'agree', concedes: [], objections: [{ against: null, claim: 'the wording is ambiguous', condition: 'name the enforcing check' }], resolves: [], nominates: null }) }; }
+    return { text: 'Agreed.' + block({ stance: 'agree', concedes: [], objections: [], resolves: [], nominates: null }) };
+  } });
+  const first = await overrule(url, ['ask', 'Which wording?', '--cycles', '1', '--json']);
+  assert.equal(first.code, 5, `expected the unsettled exit status, got ${first.code}: ${first.stderr}`);
+  assert.ok(first.stdout.trim(), `stdout was empty; stderr: ${first.stderr}`);
+  const report = JSON.parse(first.stdout);
+  assert.equal(report.verdict.code, 'unsettled'); assert.match(report.verdict.label, /ran out of turns/);
+  assert.equal(report.verdict.dissent, false); assert.equal(report.stopReason, 'budget');
+  assert.equal(report.verdict.votes.object, 0); assert.equal(report.openObjections, 1);
+  // The record a caller would otherwise have to scrape out of the prose.
+  assert.equal(report.objections[0].claim, 'the wording is ambiguous');
+  assert.equal(report.objections[0].resolvingCondition, 'name the enforcing check');
+  assert.ok(report.objections[0].raisedBy && report.objections[0].status === 'open');
+  assert.ok(report.ballots.length >= 1 && report.ballots.every(b => b.member && b.vote));
+  assert.match(report.candidate, /The sentence stands/); assert.ok(report.members.length >= 2 && report.drafter);
+  assert.equal(report.research, false); assert.ok(report.metrics && Number.isInteger(report.metrics.floorTurns));
+  // Resume with more turns instead of paying for the openings again.
+  const refused = await overrule(url, ['resume', report.id.slice(0, 8), '--json']);
+  assert.equal(refused.code, 1); assert.match(refused.stderr, /Give it more cycles than the 1 it had|reconvene it with a new instruction/);
+  const again = await overrule(url, ['resume', report.id.slice(0, 8), '--cycles', '2', '--note', 'Settle the open objection.', '--json']);
+  assert.ok(again.stdout.trim(), `resume printed nothing; stderr: ${again.stderr}`);
+  const second = JSON.parse(again.stdout);
+  assert.equal(second.id, report.id); assert.equal(second.cycles, 2);
+  assert.equal(second.metrics.floorTurns > report.metrics.floorTurns, true, 'resume did not buy more turns');
+  assert.equal((await overrule(url, ['resume', 'nope-nope'])).code, 1);
+});
+
 test('overrule review attaches a workspace, uses a report template, and answers with an exit status', async t => {
   const root = await mkdtemp(join(tmpdir(), 'overrule-cli-repo-')); t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(root, { recursive: true });
@@ -96,13 +131,17 @@ test('overrule review attaches a workspace, uses a report template, and answers 
   };
   const calls = [];
   const { url } = await serve(t, { providerCall: async (p, r) => { calls.push({ cwd: r.cwd, prompt: r.prompt }); return objecting(p, r); } });
-  const result = await overrule(url, ['review', root, '--playbook', 'changes', '--cycles', '1', '--revisions', '0', '--json']);
+  const result = await overrule(url, ['review', root, '--playbook', 'changes', '--cycles', '1', '--revisions', '0', '--exclude', '_authoring/', '--json']);
   assert.equal(result.code, 2, `expected the objections exit status, got ${result.code}: ${result.stderr}`);
   const report = JSON.parse(result.stdout);
   assert.equal(report.verdict.code, 'objections');
   assert.ok(calls.every(call => call.cwd === root), 'members did not run in the workspace');
   assert.match(calls[0].prompt, /Review the change in progress/);
   assert.match(calls[0].prompt, /read-only/);
+  assert.match(calls[0].prompt, /out of scope: _authoring\/\. Do not read or cite them/);
+  assert.match(calls[0].prompt, /not a boundary the machine enforces/);
+  // The council and what it bills is said out loud before the first call.
+  assert.match(result.stderr, /Seating .*Codex/);
   // An unknown template and an unreachable server fail with advice rather than a stack trace.
   assert.match((await overrule(url, ['review', root, '--playbook', 'nope'])).stderr, /No report template called "nope"/);
   const down = await overrule('http://127.0.0.1:9', ['ask', 'hello']);

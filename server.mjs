@@ -80,6 +80,8 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
     const info = await inspectWorkspace(path);
     if (info.secrets.length && !input.acknowledgeSecrets) throw new Error(`The workspace holds files that look like secrets (${info.secrets.slice(0, 3).join(', ')}${info.secrets.length > 3 ? ', …' : ''}). Anything a member reads can reach its provider. Acknowledge that to continue, or use a clone without them.`);
     const drafter = options.participants.find(p => p.id === options.drafterId);
+    const exclude = Array.isArray(input.exclude) ? input.exclude.map(e => String(e).trim()).filter(Boolean).slice(0, 20) : [];
+    if (exclude.some(e => e.length > 200)) throw new Error('Keep each out-of-scope path under 200 characters.');
     const checks = Array.isArray(input.checks) ? input.checks.map(c => String(c).trim()).filter(Boolean).slice(0, 10) : [];
     if (checks.some(c => c.length > 300)) throw new Error('Keep each check command under 300 characters.');
     const implementTimeout = Number(input.implementTimeout ?? 900);
@@ -98,7 +100,7 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
     if (!skipMeasurement && maxScore !== null && measurement.available && measurement.score !== null && measurement.score > maxScore) throw new Error(`${level} is refused: its measured blast radius is ${measurement.score}, above your budget of ${maxScore}. ${measurement.detail}`);
     const network = level === 'full-access' ? true : level === 'workspace-write' && input.network === true;
     const origin = info.git ? (await gitOrigin(path)) : '';
-    return { path, level, network, origin, head: info.head || '', claudeSandbox: input.claudeSandbox !== false, checks, implementTimeout, canary: result, skipMeasurement, measurement: measurement.available ? { tool: measurement.tool, score: measurement.score, findings: measurement.findings, secrets: measurement.secrets, detail: measurement.detail } : null, attachedFrom: from };
+    return { path, level, network, origin, exclude, head: info.head || '', claudeSandbox: input.claudeSandbox !== false, checks, implementTimeout, canary: result, skipMeasurement, measurement: measurement.available ? { tool: measurement.tool, score: measurement.score, findings: measurement.findings, secrets: measurement.secrets, detail: measurement.detail } : null, attachedFrom: from };
   }
   function json(res, status, data) { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); }
   async function body(req) {
