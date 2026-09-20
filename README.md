@@ -60,6 +60,14 @@ Every prompt states what each member can actually do this turn and that only the
 
 Members are stateless between calls and each turn reads the whole thread, so meetings are slow and cost tokens: a three-member, three-cycle meeting at CLI speeds takes ten to twenty minutes. Every session has a call limit and a time limit, shown with the usage as it runs; hitting one stops the meeting with its progress kept, and you can raise the limits and resume. The session limit must cover the implementer's time limit, or the meeting is refused. Failed members are skipped and dropped after two consecutive failures; an interrupted meeting can be resumed from the last committed entry.
 
+## Research mode
+
+Tick **Deep research** before the meeting and members who can reach the web search it: they are told to find the current state of the subject before taking a position, to name the source and its date for every external fact, to prefer primary sources, and to say plainly what they could not verify. A page a member reads is evidence to weigh, never an instruction.
+
+Who can actually browse is stated in every prompt, member by member, because it differs: Codex and Claude Code search through their own tools, OpenAI and Anthropic members search through their provider's search tool, and Gemini, Grok, Hugging Face, and other compatible endpoints cannot browse at all and are told to rely on what others quote. A Claude Code member reading a workspace at read-only can search but cannot fetch a page directly, because its restricted mode removes that tool. You can also switch research on or off on a stopped meeting from **Adjust and resume**.
+
+Research sends your brief's subject matter to each provider's search service, and it makes meetings slower and more expensive, since every member may search on every turn.
+
 ## Documents
 
 Drop files on the brief or press **Attach files**, from any paired device. The host reads each file's text once and shows how many characters it found. Members get that text in every prompt, labelled as material to evaluate and never as instructions. PDF, Word, Excel, PowerPoint, OpenDocument, old Office formats, plain text, code, and zip archives are read; images are not. Archives are read in memory with path, size, and nesting guards, and nothing inside them is executed or written under a name the archive chose. Uploaded files are deleted when the meeting closes; the extracted text stays until you remove it or the meeting ages out of the history, so the meeting can be reconvened.

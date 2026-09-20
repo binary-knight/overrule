@@ -323,3 +323,26 @@ test('changed settings send a verified candidate back for checking, and the floo
   assert.throws(() => mesh.applySettings(run, { workspace: { ...run.workspace, path: '/elsewhere' } }), /cannot change mid-meeting/);
   assert.throws(() => mesh.applySettings(run, { cycles: 9 }), /1–8 cycles/);
 });
+
+test('research mode reaches every call, is recorded with the meeting, and can be switched on after a stop', async t => {
+  const store = new Store(await mkdtemp(join(tmpdir(), 'mesh-research-'))); t.after(() => rm(store.directory, { recursive: true, force: true }));
+  const calls = [];
+  const mesh = new Mesh(store, async (provider, request) => { calls.push({ name: provider.name, research: request.research, system: request.system, prompt: request.prompt }); return { text: reply(phaseOf(request.prompt)) }; });
+  const plain = mesh.create({ ...options }); await finished(mesh, plain);
+  assert.equal(plain.research, false);
+  assert.ok(calls.every(c => c.research === undefined), 'a plain meeting asked for research');
+  assert.doesNotMatch(calls[0].system, /Research mode/);
+  calls.length = 0;
+  const run = mesh.create({ ...options, research: true }); await finished(mesh, run);
+  assert.equal(run.status, 'complete'); assert.equal(run.research, true);
+  assert.ok(calls.length >= 4 && calls.every(c => c.research === true), 'research did not reach every call');
+  assert.match(calls[0].system, /Research mode is on: members who can browse should search/);
+  assert.match(calls[0].prompt, /Search for the current state of the subject before you write/);
+  // The owner can also switch it on mid-meeting; the change is recorded like any other.
+  run.status = 'cancelled'; calls.length = 0;
+  mesh.resume(run, options.participants, {}, { research: false });
+  assert.match(run.entries.filter(e => e.speaker === 'owner').at(-1).text, /research mode off: no member may search the web/);
+  await finished(mesh, run);
+  assert.equal(run.research, false);
+  assert.ok(calls.every(c => c.research === undefined));
+});

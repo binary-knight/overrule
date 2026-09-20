@@ -187,6 +187,30 @@ test('CLI adapters parse structured events and keep prompts out of command argum
   const [, claudeArgs] = cliCommand('claude-cli', ''); assert.equal(claudeArgs[claudeArgs.indexOf('--tools') + 1], ''); assert.ok(claudeArgs.includes('--safe-mode'));
 });
 
+test('research mode gives the web to the members that can reach it, and to nobody else', async () => {
+  const { codexArgs, claudeArgs, apiRequest, researchSupport } = await import('../lib/providers.mjs');
+  const search = args => args[args.indexOf('-c') + 1] === undefined ? '' : args.join(' ').match(/web_search="(\w+)"/)?.[1];
+  assert.equal(search(codexArgs({})), 'disabled'); assert.equal(search(codexArgs({ research: true })), 'live');
+  assert.equal(search(codexArgs({ research: true, cwd: '/w', level: 'workspace-write' })), 'live');
+  // Claude Code: no tools at all without research, search and fetch when talking, and no fetch under a read-only workspace.
+  const tools = args => args[args.indexOf('--tools') + 1];
+  assert.equal(tools(claudeArgs({})), ''); assert.equal(tools(claudeArgs({ research: true })), 'WebSearch,WebFetch');
+  const readOnly = claudeArgs({ research: true, cwd: '/w', level: 'read-only' });
+  assert.ok(!readOnly.includes('WebSearch'), 'web search stays available under read-only');
+  assert.ok(claudeArgs({ cwd: '/w', level: 'read-only' }).includes('WebSearch'), 'web search is disallowed without research');
+  const writing = claudeArgs({ research: true, cwd: '/w', level: 'workspace-write', sandboxed: false });
+  assert.ok(writing.includes('WebFetch') && !writing.includes('--disallowedTools'));
+  // API members: the two that host a search tool get one; the rest are told they cannot browse.
+  const body = (type, model, research) => apiRequest({ type, model, baseUrl: 'https://x/v1' }, 's', 'p', 100, { research }).body;
+  assert.equal(body('openai', 'gpt-5.6', false).tools, undefined);
+  assert.deepEqual(body('openai', 'gpt-5.6', true).tools, [{ type: 'web_search' }]);
+  assert.equal(body('anthropic', 'claude-opus-5', true).tools[0].type, 'web_search_20260209');
+  assert.equal(body('anthropic', 'claude-3-5-sonnet-20241022', true).tools[0].type, 'web_search_20250305');
+  assert.equal(body('compatible', 'llama', true).tools, undefined);
+  assert.equal(researchSupport({ type: 'gemini' }).web, false);
+  assert.equal(researchSupport({ type: 'codex-cli' }).web, true);
+});
+
 test('LAN pairing rejects forged and expired cookies and throttles wrong codes', async t => {
   const access = new Access(await setup(t), ['192.0.2.1']);
   const req = { headers: {}, socket: { remoteAddress: '192.0.2.2' } };
@@ -765,13 +789,21 @@ test('the prompt states each member’s real access for the turn, and the budget
   const participants = [{ id: 'c', name: 'Codex', type: 'codex-cli' }, { id: 'k', name: 'Claude Code', type: 'claude-cli' }, { id: 'a', name: 'Sol', type: 'compatible' }];
   const base = { prompt: 'p', participants, drafterId: 'c', cycles: 1, entries: [], issues: [], dropped: [] };
   const access = run => thread(run).split('\n\n').find(block => block.startsWith('ACCESS THIS TURN'));
-  assert.equal(access(base), 'ACCESS THIS TURN\n- Codex: no tools.\n- Claude Code: no tools.\n- Sol: no tools.\nThe drafter (Codex) writes the candidate as text at the draft step.');
+  assert.equal(access(base), 'ACCESS THIS TURN\n- Codex: no file tools.\n- Claude Code: no file tools.\n- Sol: no file tools.\nThe drafter (Codex) writes the candidate as text at the draft step.');
   const write = access({ ...base, workspace: { name: 'w', level: 'workspace-write', branch: 'overrule/abc', network: false } });
-  assert.match(write, /- Codex: reads files and runs commands in a read-only sandbox; cannot write files\./); assert.match(write, /- Claude Code: reads and searches files; no shell, cannot run commands or write files\./); assert.match(write, /- Sol: no tools; relies on what others quote\./);
+  assert.match(write, /- Codex: reads files and runs commands in a read-only sandbox; cannot write files\./); assert.match(write, /- Claude Code: reads and searches files; no shell, cannot run commands or write files\./); assert.match(write, /- Sol: no file tools; relies on what others quote\./);
   assert.match(write, /Only the drafter \(Codex\) writes files, at the draft step after the floor closes, in its own checkout of branch overrule\/abc with a shell, no network/); assert.match(write, /Do not ask who holds write access/);
   assert.match(access({ ...base, workspace: { name: 'w', level: 'read-only' } }), /Nobody writes files at this level/);
   assert.match(access({ ...base, workspace: { name: 'w', level: 'full-access', branch: 'overrule/abc' } }), /- Codex: full access on this machine, every turn\./);
-  assert.match(access({ ...base, attachments: [{}] }), /- Sol: no tools; reads the DOCUMENTS text in this prompt\./);
+  assert.match(access({ ...base, attachments: [{}] }), /- Sol: no file tools; reads the DOCUMENTS text in this prompt\./);
+  // Research mode names who can actually reach the web and who cannot, per member and per level.
+  const researching = access({ ...base, research: true, workspace: { name: 'w', level: 'read-only' } });
+  assert.match(researching, /- Codex: reads files and runs commands in a read-only sandbox; cannot write files; searches the web through Codex\./);
+  assert.match(researching, /- Claude Code: .*; searches the web but cannot fetch a page directly\./);
+  assert.match(researching, /- Sol: no file tools; cannot browse; it relies on what others quote\./);
+  assert.match(researching, /Research mode is on: cite every external fact with its source and date/);
+  assert.match(rulesFor({ research: true }), /Research mode is on: members who can browse should search/);
+  assert.doesNotMatch(rulesFor({}), /Research mode/);
   // Session scoping: eight session-1 turns do not exhaust a one-cycle session 2.
   const turn = (speaker, seq, session, stance = 'agree') => ({ id: `e${seq}`, seq, speaker, name: speaker, phase: 'floor', cycle: 1, session, status: 'complete', fields: { stance, concedes: [], objections: [], resolves: [], openPoints: [] } });
   const openings = participants.map((p, i) => ({ id: `e${i}`, seq: i, speaker: p.id, name: p.name, phase: 'opening', status: 'complete', session: 1, fields: {} }));

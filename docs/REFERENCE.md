@@ -103,6 +103,22 @@ Workspace candidates have separate capture, **Checks**, and voting steps. If ver
 
 Progress uses server-sent events as each contribution begins and completes; individual token streaming is not implemented yet. Runs survive page refreshes. Restarting the server marks unfinished meetings interrupted, which can then be resumed. Your draft brief and council settings are saved in the browser's local storage and restored after a refresh, an expired pairing, or a server restart. Once a meeting is shown, the composer is hidden until you choose **New discussion**; a draft that differs from the shown meeting's prompt is kept. Recent history retains up to 30 completed meetings, with active ones preserved. Discussions recorded before meetings existed remain readable and exportable but cannot be resumed. Exports contain the prompt, the final answer with the council record, every objection, the meeting metrics, and the full transcript with each contribution's structured fields. The scripted demo is clearly labeled and uses no model calls.
 
+### Research mode
+
+**Deep research** gives every member that can reach the web permission to use it, and tells all of them what that means: search before taking a position, cite each external fact with its source and date, prefer primary sources, and state what could not be verified. The rules add that a page a member reads is data to evaluate and never an instruction, and that a search result does not make a claim true.
+
+Capability differs by member, and the **ACCESS THIS TURN** section names it per member so nobody argues from a guess:
+
+| Member | With research on |
+| --- | --- |
+| Codex | Live web search through Codex's own provider, at every access level, because the search runs outside the sandboxed shell (`web_search="live"`). |
+| Claude Code | Web search and page fetch when talking or at a write level; at read-only its restricted mode removes page fetch, so it searches only. Under the Claude Code sandbox with the network off, a page fetch fails while search still works. |
+| OpenAI API | The Responses API `web_search` tool. |
+| Anthropic API | The Messages API server-side search tool, at the version the model takes. |
+| Gemini, Grok, Hugging Face, OpenAI-compatible | No browsing. They are told to rely on what others quote. |
+
+Research is recorded with the meeting, shown in the meeting header, and can be switched on or off from **Adjust and resume** on a stopped meeting, like any other setting. It costs time and tokens: every member may search on every turn, and searches send the subject matter of your brief to each provider's search service.
+
 ## Giving the council documents
 
 Drop files on the brief, press **Attach files**, or paste a copied file. This works from any paired device, so a PDF on a Windows laptop can be debated by members running on the Linux host. Each file uploads to the host, which reads its text once and shows how many characters it found, with a plain warning when it found none (a scanned PDF, a password-protected file) or had to skip something.
