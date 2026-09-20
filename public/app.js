@@ -256,7 +256,7 @@ const who = (run, id) => id === 'owner' ? 'You' : run.participants.find(p => p.i
 const elapsed = e => e.startedAt ? `${Math.max(0, Math.round((new Date(e.finishedAt || Date.now()) - new Date(e.startedAt)) / 1000))}s` : '';
 function entryTag(run, e) {
   if (e.phase === 'opening') return 'Opening position';
-  if (e.phase === 'floor') return e.speaker === 'owner' ? (e.reconvene ? `You reconvened the council, session ${e.session || 1}` : 'You') : `Floor, cycle ${e.cycle}${(run.sessions?.length || (e.session || 1) > 1) ? `, session ${e.session || 1}` : ''}`;
+  if (e.phase === 'floor') return e.speaker === 'owner' ? (e.reconvene ? `You reconvened the council, session ${e.session || 1}` : e.adjust ? 'You changed the settings' : 'You') : `Floor, cycle ${e.cycle}${(run.sessions?.length || (e.session || 1) > 1) ? `, session ${e.session || 1}` : ''}`;
   if (e.phase === 'draft') return `Candidate v${e.candidateVersion}`;
   if (e.phase === 'ratify') return `Ballot on v${e.candidateVersion}`;
   return e.phase === 'propose' ? 'Independent proposal' : e.phase === 'review' ? `Review, round ${e.round}` : 'Final synthesis';
@@ -291,7 +291,7 @@ function renderEntry(run, e) {
     extras += `<div class="candidate"><div><b>Candidate commit ${escapeHTML(c.hash.slice(0, 12))}</b> on ${escapeHTML(c.branch)}${c.changed ? '' : ' <span class="warn">(no file changes)</span>'}${c.artifact ? `. <a href="/api/runs/${run.id}/patch">Download patch</a>` : ''}</div>${c.files.length ? `<ul class="files">${c.files.map(fi => `<li><code>${escapeHTML(fi.status)}</code> ${escapeHTML(fi.path)}</li>`).join('')}</ul>` : ''}${c.patch ? `<details><summary>Patch (${c.bytes.toLocaleString()} bytes)</summary><pre>${escapeHTML(c.patch)}</pre></details>` : ''}${c.checks.length ? c.checks.map(k => `<details${k.code === 0 ? '' : ' open'}><summary>$ ${escapeHTML(k.command)} → ${k.code === 0 ? 'passed' : k.code === null ? 'could not run' : `exit ${k.code}`} (${k.seconds}s)</summary><pre>${escapeHTML(k.output)}</pre></details>`).join('') : ''}${checkNote ? `<div class="warn">${checkNote}</div>` : ''}</div>`;
   }
   if (e.actions?.length) extras += `<details class="activity"><summary>Activity: ${e.actions.length} tool event${e.actions.length === 1 ? '' : 's'}</summary><ul>${e.actions.map(a => `<li><code>${escapeHTML(a.type)}</code> ${a.command ? escapeHTML(a.command) : ''}${a.exitCode !== undefined && a.exitCode !== null ? ` → exit ${a.exitCode}` : ''}${a.paths?.length ? `, ${a.paths.map(escapeHTML).join(', ')}` : ''}</li>`).join('')}</ul></details>`;
-  return `<article class="card msg ${e.speaker === 'owner' ? 'owner' : ''} ${e.reconvene ? 'reconvene' : ''} ${e.status} ${e.superseded ? 'superseded' : ''}" id="entry-${escapeHTML(e.id)}" data-entry="${escapeHTML(e.id)}" tabindex="-1"><header><span class="entry-status ${e.status}">${icon}</span><strong>${escapeHTML(who(run, e.speaker))}</strong><span>${entryTag(run, e)}${e.addressedOwner ? ', answering you' : ''}</span>${chips.join('')}<small>${escapeHTML(e.id)}, ${e.status === 'running' ? 'speaking' : e.status}, ${elapsed(e)}</small></header><div class="msg-body">${e.text ? markdown(e.text) : `<p>${escapeHTML(e.error || 'Speaking…')}</p>`}${meta.map(m => `<p class="entry-meta">${m}</p>`).join('')}${extras}</div></article>`;
+  return `<article class="card msg ${e.speaker === 'owner' ? 'owner' : ''} ${e.reconvene || e.adjust ? 'reconvene' : ''} ${e.status} ${e.superseded ? 'superseded' : ''}" id="entry-${escapeHTML(e.id)}" data-entry="${escapeHTML(e.id)}" tabindex="-1"><header><span class="entry-status ${e.status}">${icon}</span><strong>${escapeHTML(who(run, e.speaker))}</strong><span>${entryTag(run, e)}${e.addressedOwner ? ', answering you' : ''}</span>${chips.join('')}<small>${escapeHTML(e.id)}, ${e.status === 'running' ? 'speaking' : e.status}, ${elapsed(e)}</small></header><div class="msg-body">${e.text ? markdown(e.text) : `<p>${escapeHTML(e.error || 'Speaking…')}</p>`}${meta.map(m => `<p class="entry-meta">${m}</p>`).join('')}${extras}</div></article>`;
 }
 function entryLink(run, id, label = id) {
   return run.entries.some(e => e.id === id) ? `<a href="#entry-${encodeURIComponent(id)}" data-jump-entry="${escapeHTML(id)}">${escapeHTML(label)}</a>` : escapeHTML(label);
@@ -388,15 +388,41 @@ function renderRun(run) {
   $('issues').innerHTML = `<h3>Objections</h3>` + issues.map(i => `<div class="issue"><b>${escapeHTML(i.id)}</b><span>${escapeHTML(who(run, i.raisedBy))} → ${escapeHTML(who(run, i.against))}: “${escapeHTML(i.claim)}”<br>Resolves when ${escapeHTML(i.condition)}</span><span class="chip ${i.status === 'resolved' ? 'vote-approve' : 'vote-object'}">${i.status}</span></div>`).join('');
   $('say-form').classList.toggle('hidden', !meeting || run.status !== 'running');
   $('reconvene-form').classList.toggle('hidden', !meeting || run.demo || run.status === 'running' || !run.floorStarted); $('reconvene-form').querySelector('button').disabled = false;
-  $('limit-form').classList.toggle('hidden', !needsLimits);
-  if (needsLimits && (changedSession || !wasShowingLimits)) {
-    $('resume-max-calls').value = run.budget.maxCalls;
-    $('resume-duration').value = Math.ceil(run.budget.maxDurationSeconds / 60);
-  }
+  $('limit-form').classList.toggle('hidden', !stopped);
+  $('limit-form').querySelector('h3').textContent = needsLimits ? 'Raise the limits and resume' : 'Adjust and resume';
+  if (stopped && (changedSession || !wasShowingLimits)) fillAdjustForm(run);
   if (changedSession) { $('reconvene-max-calls').value = ''; $('reconvene-duration').value = Math.ceil((run.budget?.maxDurationSeconds || 3600) / 60); }
   $('say-note').textContent = run.pendingOwner?.length ? `${run.pendingOwner.length} message${run.pendingOwner.length === 1 ? '' : 's'} queued for the next turn.` : 'Delivered at the next turn. The next member must address you.';
   updateEstimate();
 }
+// The adjust panel starts from what the meeting is running with now, so submitting it unchanged changes nothing.
+function fillAdjustForm(run) {
+  const ws = run.workspace;
+  $('adjust-workspace').classList.toggle('hidden', !ws);
+  if (ws) {
+    for (const input of document.querySelectorAll('input[name=adjust-level]')) input.checked = input.value === ws.level;
+    $('adjust-network').checked = Boolean(ws.network); $('adjust-network').disabled = ws.level === 'read-only';
+    $('adjust-claude-sandbox').checked = ws.claudeSandbox !== false;
+    $('adjust-checks').value = (ws.checks || []).join('\n');
+    $('adjust-timeout').value = ws.implementTimeout || 900;
+    adjustLevelChanged();
+  }
+  $('adjust-cycles').value = String(run.cycles); $('adjust-revisions').value = String(run.maxRevisions ?? 1);
+  $('adjust-cycles-hint').classList.toggle('hidden', run.stopReason !== 'budget');
+  if (run.budget) { $('resume-max-calls').value = run.budget.maxCalls; $('resume-duration').value = Math.ceil(run.budget.maxDurationSeconds / 60); }
+  $('adjust-note').value = '';
+}
+function adjustLevel() { return document.querySelector('input[name=adjust-level]:checked')?.value || 'read-only'; }
+function adjustLevelChanged() {
+  const level = adjustLevel();
+  $('adjust-full-ack').classList.toggle('hidden', level !== 'full-access');
+  // Moving a read-only meeting to a write level is the first time uncommitted work matters, so it is acknowledged here.
+  $('adjust-dirty-ack').classList.toggle('hidden', level === 'read-only' || currentRun?.workspace?.level !== 'read-only');
+  if (level === 'full-access') { $('adjust-network').checked = true; $('adjust-network').disabled = true; }
+  else $('adjust-network').disabled = level === 'read-only';
+  if (level === 'read-only') $('adjust-network').checked = false;
+}
+document.querySelectorAll('input[name=adjust-level]').forEach(input => input.onchange = adjustLevelChanged);
 function watchRun(run) {
   events?.close(); renderRun(run); selectTab(['complete', 'limited'].includes(run.status) ? 'answer' : 'transcript');
   if (run.status !== 'running') return;
@@ -588,10 +614,18 @@ $('resume').onclick = async () => {
 $('limit-form').addEventListener('submit', async event => {
   event.preventDefault(); if (!currentRun) return;
   const button = event.submitter; button.disabled = true;
-  try {
-    const run = await api(`/api/runs/${currentRun.id}/resume`, 'POST', { maxCalls: Number($('resume-max-calls').value), maxDurationSeconds: Number($('resume-duration').value) * 60 });
-    watchRun(run); await refreshHistory();
-  } catch (error) { toast(error.message); } finally { button.disabled = false; }
+  const ws = currentRun.workspace;
+  const payload = {
+    maxCalls: Number($('resume-max-calls').value), maxDurationSeconds: Number($('resume-duration').value) * 60,
+    cycles: Number($('adjust-cycles').value), revisions: Number($('adjust-revisions').value), note: $('adjust-note').value.trim(),
+  };
+  if (ws) payload.workspace = {
+    level: adjustLevel(), network: $('adjust-network').checked, claudeSandbox: $('adjust-claude-sandbox').checked,
+    checks: $('adjust-checks').value.split('\n').map(line => line.trim()).filter(Boolean), implementTimeout: Number($('adjust-timeout').value),
+    acknowledgeSecrets: true, acknowledgeDirty: ws.level !== 'read-only' || $('adjust-ack-dirty').checked, acknowledgeFullAccess: $('adjust-ack-full').checked, skipMeasurement: ws.skipMeasurement === true,
+  };
+  try { const run = await api(`/api/runs/${currentRun.id}/resume`, 'POST', payload); watchRun(run); await refreshHistory(); toast('Resumed.'); }
+  catch (error) { toast(error.message); } finally { button.disabled = false; }
 });
 document.querySelectorAll('[data-example]').forEach(button => button.onclick = () => { $('prompt').value = button.dataset.example; $('prompt').dispatchEvent(new Event('input')); $('prompt').focus(); });
 document.querySelectorAll('[data-tab]').forEach(button => button.onclick = () => selectTab(button.dataset.tab));

@@ -259,3 +259,67 @@ test('reconvening requires new stances and legacy repeated speakers do not compl
   add('2', 'disagree'); action = plan(old, activeMembers(old));
   assert.equal(action.type, 'stop'); assert.equal(action.reason, 'budget');
 });
+
+test('a stopped meeting resumes with changed settings: the partial build is kept and the change is on the record', async t => {
+  const { store, project, workspace } = await fixture(t);
+  const seen = []; let failDraft = true;
+  const mesh = new Mesh(store, async (provider, request) => {
+    seen.push({ phase: phaseOf(request.prompt), network: request.network, cwd: request.cwd, prompt: request.prompt, partial: Boolean(request.cwd) && existsSync(join(request.cwd, 'half-done.txt')) });
+    if (phaseOf(request.prompt) === 'draft') {
+      if (failDraft) { await writeFile(join(request.cwd, 'half-done.txt'), 'partial work\n'); throw new Error('provider down'); }
+      return implementation(provider, request);
+    }
+    return { text: reply(phaseOf(request.prompt)) };
+  }, { runChecks: async commands => commands.map(result) });
+  const run = mesh.create({ ...options, workspace: { ...workspace, network: false, implementTimeout: 900 }, maxDurationSeconds: 3600 });
+  await finished(mesh, run);
+  // The implementer failed part-way. Its checkout survives the stop, so the resume hands back the same partial work.
+  assert.equal(run.status, 'failed');
+  assert.ok(run.workspace.impl && existsSync(join(run.workspace.impl, 'half-done.txt')), 'the partial build was discarded');
+  assert.equal(seen.filter(s => s.phase === 'draft').at(-1).network, false);
+  const implPath = run.workspace.impl;
+  failDraft = false;
+  mesh.resume(run, options.participants, {}, { workspace: { ...run.workspace, network: true, checks: ['verify', 'verify --again'] }, note: 'Proceed with internet access.' });
+  await finished(mesh, run);
+  assert.equal(run.status, 'complete', run.error);
+  const owner = run.entries.filter(e => e.speaker === 'owner').at(-1);
+  assert.equal(owner.adjust, true);
+  assert.match(owner.text, /Settings changed before resuming: network on for the implementer and the checks; checks: verify, verify --again\./);
+  assert.match(owner.text, /Proceed with internet access\./);
+  const implementer = seen.filter(s => s.phase === 'draft').at(-1);
+  assert.equal(implementer.network, true); assert.equal(implementer.cwd, implPath);
+  assert.equal(implementer.partial, true, 'the implementer did not get its own partial work back');
+  // The next member answers the owner, and every prompt after the change states the new access.
+  const afterOwner = run.entries.filter(e => e.seq > owner.seq && e.phase === 'floor' && e.speaker !== 'owner');
+  assert.equal(afterOwner.length, 1);
+  assert.match(seen.find(s => /OWNER changed the meeting settings/.test(s.prompt)).prompt, /with a shell and network/);
+  assert.deepEqual(latestCandidate(run).checks.map(c => c.command), ['verify', 'verify --again']);
+});
+
+test('changed settings send a verified candidate back for checking, and the floor reopens when the owner adds cycles', async t => {
+  const { store, workspace } = await fixture(t);
+  let checks = 0;
+  const mesh = new Mesh(store, implementation, { runChecks: async commands => { checks++; return commands.map(result); } });
+  const run = mesh.create({ ...options, workspace, maxDurationSeconds: 3600 });
+  await finished(mesh, run);
+  assert.equal(run.status, 'complete'); assert.equal(checks, 1);
+  assert.equal(run.record.verdict.code, 'approved');
+  const floorBefore = run.entries.filter(e => e.phase === 'floor' && e.speaker !== 'owner').length;
+  // The meeting closed on budget with one cycle; two more cycles reopen the floor, and a new check re-verifies the same commit.
+  run.status = 'cancelled'; run.stopReason = 'budget';
+  const hash = latestCandidate(run).hash;
+  mesh.resume(run, options.participants, {}, { cycles: 3, maxRevisions: 2, workspace: { ...run.workspace, checks: ['verify', 'verify --twice'] } });
+  const owner = run.entries.filter(e => e.speaker === 'owner').at(-1);
+  assert.match(owner.text, /meeting length 1 to 3 cycles/); assert.match(owner.text, /the floor reopens/);
+  assert.match(owner.text, /the candidate goes back for verification under the new settings/);
+  assert.match(owner.text, /revisions after objections 0 to 2/);
+  await finished(mesh, run);
+  assert.equal(run.status, 'complete', run.error);
+  assert.equal(run.cycles, 3); assert.equal(run.maxRevisions, 2);
+  assert.ok(run.entries.filter(e => e.phase === 'floor' && e.speaker !== 'owner').length > floorBefore, 'the floor did not reopen');
+  assert.equal(checks, 2); assert.equal(latestCandidate(run).hash, hash);
+  assert.deepEqual(latestCandidate(run).checks.map(c => c.command), ['verify', 'verify --twice']);
+  assert.equal(run.record.verdict.code, 'approved');
+  assert.throws(() => mesh.applySettings(run, { workspace: { ...run.workspace, path: '/elsewhere' } }), /cannot change mid-meeting/);
+  assert.throws(() => mesh.applySettings(run, { cycles: 9 }), /1–8 cycles/);
+});

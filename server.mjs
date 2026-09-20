@@ -280,12 +280,24 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
           const pool = run.demo ? demoPool() : providers;
           const participants = run.participants.map(p => pool.find(x => x.id === p.id));
           if (participants.some(p => !p)) throw new Error('A connection used by this discussion no longer exists. Start a new discussion instead.');
-          if (run.workspace) {
+          // Resuming may carry changed settings: the same meeting, picked up under a new access level, network setting, or checks.
+          // The workspace folder is locked to the one the members have read; everything else about it is the owner's to change.
+          let changes = {};
+          if (match[2] === 'resume') {
+            const note = String(input.note || '').trim();
+            if (note.length > 4000) throw new Error('Keep the note to the council under 4,000 characters.');
+            changes = { note, cycles: input.cycles === undefined ? undefined : Number(input.cycles), maxRevisions: input.revisions === undefined ? undefined : Number(input.revisions) };
+            if (input.workspace) {
+              if (!run.workspace) throw new Error('This meeting has no workspace. Reconvene it or start a new meeting to attach one.');
+              changes.workspace = await parseWorkspace({ ...input.workspace, path: run.workspace.path }, { participants, drafterId: run.drafterId }, local ? 'localhost' : String(req.socket.remoteAddress || 'lan'));
+            }
+          }
+          if (run.workspace && !changes.workspace) {
             const result = await canary(run.workspace.level, run.workspace.path);
             if (!result.ok) throw new Error(`${run.workspace.level} is refused on this machine: ${result.detail}`);
           }
           if (!run.demo) await assertReady(participants);
-          return json(res, 200, match[2] === 'reconvene' ? await mesh.reconvene(run, participants, { text, cycles, maxCalls: input.maxCalls, maxDurationSeconds: input.maxDurationSeconds }) : mesh.resume(run, participants, input));
+          return json(res, 200, match[2] === 'reconvene' ? await mesh.reconvene(run, participants, { text, cycles, maxCalls: input.maxCalls, maxDurationSeconds: input.maxDurationSeconds }) : mesh.resume(run, participants, input, changes));
         }
         if (req.method === 'POST' && (match[2] === 'apply' || match[2] === 'discard')) {
           return json(res, 200, match[2] === 'apply' ? await mesh.applyCandidate(run) : await mesh.discardCandidate(run));
