@@ -52,14 +52,17 @@ test('the agent instructions and prompts only use commands and options the tool 
   const usage = (await run(process.execPath, [CLI, '--help'])).stdout;
   // Only the agent-facing files: the README describes other tools' flags as well.
   const docs = await Promise.all(['AGENTS.md', 'docs/agent-prompt.md'].map(name => readFile(join(dirname(fileURLToPath(import.meta.url)), '..', name), 'utf8')));
-  const text = docs.join('\n');
+  const text = docs.join('\n'), agentsDoc = docs[0];
   const commands = [...text.matchAll(/overrule(?:\.mjs)? ([a-z-]+)/g)].map(m => m[1]).filter(name => !['playbooks'].includes(name));
   for (const command of new Set(commands)) assert.match(usage, new RegExp(`overrule ${command}\\b`), `documented command "${command}" is not in the usage`);
   const flags = [...text.matchAll(/--[a-z][a-z-]+/g)].map(m => m[0]);
   for (const flag of new Set(flags)) assert.ok(usage.includes(flag), `documented option "${flag}" is not in the usage`);
   // The exit statuses the instructions promise are the ones the tool actually uses.
-  for (const line of ['0 approved', '2 objections remain', '3 checks failed', '4 verification incomplete']) assert.ok(usage.includes(line), line);
-  const agents = docs[0];
+  for (const line of ['0 approved', '2 a member voted against', '3 a check on the candidate failed', '5 unsettled', 'retryable rather than as failure']) assert.ok(usage.includes(line), line);
+  // The instructions must agree with the tool about which statuses mean the council settled the question.
+  assert.match(agentsDoc, /Treat any non-zero status you do not recognise as retryable rather than as failure/);
+  for (const [status, settled] of [['0', 'Settled'], ['2', 'Settled'], ['3', 'Settled'], ['5', 'Retryable'], ['4', 'Retryable']]) assert.match(agentsDoc, new RegExp(`\\| ${status} \\| ${settled} \\|`), `status ${status} is not marked ${settled}`);
+  const agents = agentsDoc;
   assert.match(agents, /Never pass `--level workspace-write`|Never pass `--acknowledge`/);
   assert.match(docs[1], /```\n[\s\S]*overrule/, 'the prompt file has no copy-paste block');
 });
@@ -89,7 +92,7 @@ test('a meeting decided by an older version is judged again, so the report and t
 test('overrule ask holds a meeting and reports its verdict, and --json is machine readable', async t => {
   const { url, seen } = await serve(t);
   const help = await overrule(url, ['--help']);
-  assert.equal(help.code, 0); assert.match(help.stdout, /overrule ask/); assert.match(help.stdout, /Exit status: 0 approved/);
+  assert.equal(help.code, 0); assert.match(help.stdout, /overrule ask/); assert.match(help.stdout, /Exit status says whether the council settled the question/);
   const templates = await overrule(url, ['playbooks']);
   assert.match(templates.stdout, /^security\s/m); assert.match(templates.stdout, /^changes\s/m);
   const result = await overrule(url, ['ask', 'Should we ship on Friday?', '--cycles', '1', '--json']);

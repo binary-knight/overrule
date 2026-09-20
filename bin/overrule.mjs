@@ -46,9 +46,12 @@ Options
   --url <address>        Server to use. Default ${DEFAULT_URL}.
   --code <pairing code>  Pair first; needed only when the server is not on this machine.
 
-Exit status: 0 approved, 2 objections remain (a member voted against), 3 checks failed,
-4 verification incomplete, 5 unsettled (out of turns or stalled, with nobody dissenting;
-resume with more cycles), 1 error.`;
+Exit status says whether the council settled the question.
+  Settled:    0 approved · 2 a member voted against · 3 a check on the candidate failed
+  Retryable:  5 unsettled, nobody dissented and more turns would plausibly change it
+              4 verification did not finish
+  Error:      1
+Treat any non-zero status you do not recognise as retryable rather than as failure.`;
 
 const VERDICT_EXIT = { approved: 0, objections: 2, 'checks-failed': 3, incomplete: 4, unsettled: 5 };
 const FLAGS = new Set(['research', 'deep-research', 'network', 'json', 'quiet', 'no-wait', 'acknowledge', 'acknowledge-full-access', 'help', 'version']);

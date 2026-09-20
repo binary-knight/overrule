@@ -24,14 +24,18 @@ overrule review . --playbook changes --cycles 1 --json
 
 The council reads your working tree, finds the change with `git status` and `git diff`, and judges that change, not the project. The exit status is the answer:
 
-| Status | Meaning |
-| --- | --- |
-| 0 | Approved. Every voter approved and nothing is open. |
-| 2 | A member voted against the candidate. Real dissent; read the objections. |
-| 3 | A command the council ran on the candidate failed. |
-| 4 | Verification incomplete: there is a candidate, but the vote did not finish. |
-| 5 | Unsettled: the meeting ran out of turns or stopped moving, with nobody dissenting. Buy it more turns rather than treating it as disagreement. |
-| 1 | Something went wrong. Read the message. |
+The first question it answers is whether the council settled the question at all, which is the difference between spending more and acting on an answer.
+
+| Status | Settled? | Meaning |
+| --- | --- | --- |
+| 0 | Settled | Approved. Every voter approved and nothing is open. |
+| 2 | Settled | A member voted against the candidate. Real dissent; read the objections and decide whether you agree. |
+| 3 | Settled | A command the council ran on the candidate failed. |
+| 5 | Retryable | Unsettled: the council reached no conclusion and nobody dissented, because the floor ran out of turns or stopped moving. More turns would plausibly change the answer. |
+| 4 | Retryable | Verification did not finish: there is a candidate, but the vote did not complete. |
+| 1 | Error | Something went wrong. Read the message. |
+
+**Treat any non-zero status you do not recognise as retryable rather than as failure.** New outcomes get new numbers, and a caller that branches on "not 0 and not 2 means broken" will mislabel them.
 
 Nothing is printed on standard output until the verdict; progress goes to standard error. Do not pipe the output into a parser before the command exits.
 
@@ -50,7 +54,7 @@ Read the whole report, not just the verdict. The value is in the objections, whi
 - **Approved.** Say so, and name anything the council flagged anyway.
 - **Objections remain.** Do not treat this as failure. Report the objections to the person in their own words, say which ones you agree with, and fix what is worth fixing.
 - **Checks failed.** A command the council ran on the candidate failed. That is a fact, not an opinion; act on it.
-- **Unsettled.** The clock ran out, not the argument. `overrule resume <id> --cycles 3` carries on with the same council and record instead of paying for the openings again, and `--note "<what to settle>"` goes in as the owner's own message.
+- **Unsettled.** The council reached no conclusion and nobody dissented: the floor ran out of turns or stopped moving. `overrule resume <id> --cycles 3` carries on with the same council and record instead of paying for the openings again, and `--note "<what to settle>"` goes in as the owner's own message.
 - **Error.** Report what the message said. Do not retry in a loop.
 
 With `--json` you get the record, not only the prose: `verdict` (with `dissent`, `stopReason`, and the vote counts), `ballots[]`, `objections[]` with each one's `resolvingCondition`, the `candidate` text, `members`, `metrics`, and the meeting `url`. Quote from those fields rather than scraping the Markdown.
