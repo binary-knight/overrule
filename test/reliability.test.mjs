@@ -454,7 +454,7 @@ test('a repository is cloned over https only, refreshed in place, and never aske
 test('report templates build a brief that names the repository, the commit, and how to report', async () => {
   const { PLAYBOOKS, buildPlaybook, playbook } = await import('../public/playbooks.js');
   assert.ok(PLAYBOOKS.length >= 6);
-  assert.deepEqual(PLAYBOOKS.map(p => p.id), ['security', 'bugs', 'dependencies', 'architecture', 'tests', 'performance', 'readiness']);
+  assert.deepEqual(PLAYBOOKS.map(p => p.id), ['security', 'changes', 'bugs', 'dependencies', 'architecture', 'tests', 'performance', 'readiness']);
   for (const entry of PLAYBOOKS) {
     const text = entry.build({ name: 'agentsec-pack', head: 'abcdef0123456789', origin: 'https://github.com/binary-knight/agentsec-pack.git' });
     assert.match(text, /agentsec-pack/); assert.match(text, /commit abcdef012345/);

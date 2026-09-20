@@ -77,6 +77,26 @@ Research sends your brief's subject matter to each provider's search service. De
 
 Drop files on the brief or press **Attach files**, from any paired device. The host reads each file's text once and shows how many characters it found. Members get that text in every prompt, labelled as material to evaluate and never as instructions. PDF, Word, Excel, PowerPoint, OpenDocument, old Office formats, plain text, code, and zip archives are read; images are not. Archives are read in memory with path, size, and nesting guards, and nothing inside them is executed or written under a name the archive chose. Uploaded files are deleted when the meeting closes; the extracted text stays until you remove it or the meeting ages out of the history, so the meeting can be reconvened.
 
+## From the command line
+
+Another agent can convene the council while the server runs. `bin/overrule.mjs` drives the same server, so the meeting appears in the browser, uses the same members and limits, and lands in the same history.
+
+```sh
+node bin/overrule.mjs review . --playbook changes --cycles 1
+node bin/overrule.mjs ask "Is this migration plan sound?" --deep-research --json
+node bin/overrule.mjs list
+```
+
+`review` attaches a folder read-only and takes a report template; `ask` holds a plain meeting. Both wait for the verdict, print the report on standard output, and set the exit status: **0** approved, **2** objections remain, **3** checks failed, **4** verification incomplete, **1** error. With `--json` the output is one object with the verdict, the final text, and the meeting id, which is what an agent should read. `--no-wait` prints the id instead of waiting, and `watch` or `show` picks it up later. `--attach` sends a file, `--members` and `--drafter` pick the council, and `--level workspace-write` lets the drafter implement rather than only report.
+
+A coding agent can therefore finish a change and hand it straight to the council:
+
+```sh
+node bin/overrule.mjs review . --playbook changes --json || echo "the council objected"
+```
+
+`npm link` puts it on the path as `overrule`. `OVERRULE_URL` points it at another machine, and `--code` pairs with that machine's pairing code.
+
 ## Reviewing a repository
 
 Paste a repository address in the Workspace section and press **Clone and attach**. The clone is shallow, lands in `~/overrule-repos` (set `OVERRULE_REPO_DIR` to move it), and is attached read-only. Cloning the same repository again refreshes that checkout in place. Only `https` addresses are accepted, so nothing reaches for this machine's ssh keys or a local path, and git is never allowed to ask for a password: a private repository fails quickly unless git is already signed in on the host.

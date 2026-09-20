@@ -41,6 +41,23 @@ ${STANDARD}
 Do not write exploit code. Describe the path precisely enough for a maintainer to reproduce and fix it, and no further. Disagreement about severity is worth more than a long list: argue it out and record what you settled on.`,
   },
   {
+    id: 'changes',
+    label: 'Review the change in progress: is this edit sound?',
+    summary: 'Judges the uncommitted or recent change, not the whole project.',
+    build: ctx => `Review the change in progress in ${ctx.name} and say whether it is sound.
+
+${scope(ctx)}
+
+WHAT TO COVER
+Find the change first: run "git status" and "git diff" for uncommitted work, and "git log --oneline -5" with "git show" for what landed recently. Judge that change, not the rest of the project. For each hunk, ask: does it do what it says, does it break a caller or a contract elsewhere in the tree, does it handle the error and boundary cases it introduces, does it leave dead or duplicated code, is it tested, and does it change behaviour the documentation still describes the old way. Read the surrounding code before calling something wrong: the change may be right for reasons the diff does not show.
+
+${format('severity, title, file and line, what is wrong with the change, evidence quoted from the diff or the surrounding code, and the fix')}
+
+${STANDARD}
+
+End with a verdict on the change itself: sound as it stands, sound with the fixes listed, or not sound, and one sentence saying why. If you could not find a change, say so rather than reviewing the project at large.`,
+  },
+  {
     id: 'bugs',
     label: 'Bug hunt: correctness defects in the current code',
     summary: 'Logic errors, unhandled cases, and the inputs that trigger them.',
