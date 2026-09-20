@@ -1,4 +1,5 @@
 import { assessResult, callsUsed, elapsedBudget, estimateCalls, citationEvidence } from './meeting-state.js';
+import { PLAYBOOKS, buildPlaybook } from './playbooks.js';
 
 const $ = id => document.getElementById(id);
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -190,6 +191,7 @@ function workspaceLevelChanged() {
 }
 function renderWorkspaceInfo(info) {
   state.workspaceInfo = info;
+  $('playbooks').classList.toggle('hidden', !info);
   const lines = [];
   lines.push(info.git ? `<span class="ok">Git repository</span> on branch <b>${escapeHTML(info.branch)}</b> at ${escapeHTML((info.head || '').slice(0, 10))}${info.dirty ? `, <span class="warn">${info.dirtyFiles.length} uncommitted change${info.dirtyFiles.length === 1 ? '' : 's'}</span>` : ', clean'}` : `<span class="warn">Not a git repository root</span>, so read-only only`);
   if (info.secrets?.length) lines.push(`<span class="warn">Looks like secrets:</span> ${info.secrets.slice(0, 6).map(escapeHTML).join(', ')}${info.secrets.length > 6 ? ', …' : ''}`);
@@ -378,7 +380,7 @@ function renderRun(run) {
   $('run-workspace').classList.toggle('start-blocker', ws?.level === 'full-access');
   const research = run.research ? `Internet research on${run.deepResearch ? ', deep research on' : ''}: members may search the web` : '';
   if (!ws && run.research) $('run-workspace').textContent = research + '.';
-  if (ws) $('run-workspace').textContent = [`Workspace ${ws.name}, ${ws.level === 'full-access' ? 'full access' : ws.level}`, ws.attachedFrom && ws.attachedFrom !== 'localhost' ? `attached from ${ws.attachedFrom}` : '', ws.branch ? `branch ${ws.branch}` : '', ws.network ? 'network on' : '', ws.applied ? `applied into ${ws.applied.into} at ${new Date(ws.applied.at).toLocaleTimeString()}` : ws.discarded ? 'branch discarded' : '', ws.measurement ? `blast radius ${ws.measurement.score ?? '?'} of 100` : '', (ws.canary?.detail || '').replace(/\.$/, ''), research].filter(Boolean).join('. ') + '.';
+  if (ws) $('run-workspace').textContent = [`Workspace ${ws.name}, ${ws.level === 'full-access' ? 'full access' : ws.level}`, ws.origin ? `a clone of ${ws.origin}` : '', ws.head ? `at commit ${ws.head.slice(0, 12)}` : '', ws.attachedFrom && ws.attachedFrom !== 'localhost' ? `attached from ${ws.attachedFrom}` : '', ws.branch ? `branch ${ws.branch}` : '', ws.network ? 'network on' : '', ws.applied ? `applied into ${ws.applied.into} at ${new Date(ws.applied.at).toLocaleTimeString()}` : ws.discarded ? 'branch discarded' : '', ws.measurement ? `blast radius ${ws.measurement.score ?? '?'} of 100` : '', (ws.canary?.detail || '').replace(/\.$/, ''), research].filter(Boolean).join('. ') + '.';
   const candidate = ws && [...run.entries].reverse().find(e => e.phase === 'draft' && e.status === 'complete' && !e.superseded && e.candidateVersion === run.candidateVersion && e.candidate)?.candidate;
   const canAct = Boolean(candidate) && run.status !== 'running' && !ws.applied && !ws.discarded;
   const checksFinished = candidate && (!candidate.checkStatus || candidate.checkStatus === 'complete') && candidate.checks.length === ws.checks.length && ws.checks.every((command, i) => candidate.checks[i].command === command && Number.isInteger(candidate.checks[i].code));
@@ -624,6 +626,36 @@ $('say-form').addEventListener('submit', async event => {
   try { await api(`/api/runs/${currentRun.id}/say`, 'POST', { text }); $('say-text').value = ''; toast('Delivered. The next member will address you.'); }
   catch (error) { toast(error.message); } finally { button.disabled = false; }
 });
+$('repo-clone').onclick = async () => {
+  const button = $('repo-clone'), url = $('repo-url').value.trim();
+  if (!url) { $('repo-url').focus(); return toast('Enter the https address of a repository.'); }
+  button.disabled = true; button.textContent = 'Cloning…';
+  try {
+    const repo = await api('/api/workspace/clone', 'POST', { url });
+    state.repo = repo; $('repo-url').value = '';
+    $('workspace-path').value = repo.path; saveDraft();
+    toast(`${repo.name} at ${repo.head.slice(0, 8)}${repo.updated ? ' (updated an existing clone)' : ''}. Attached read-only.`);
+    if (!levelValue()) document.querySelector('input[name=workspace-level][value=read-only]').checked = true;
+    $('workspace-inspect').click();
+    try { state.workspaceConfig = await api('/api/workspace'); workspaceSetup(); } catch {}
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; button.textContent = 'Clone and attach'; }
+};
+// Report templates: only useful once the council has something to read, so they appear with the workspace.
+function playbookSetup() {
+  $('playbook').innerHTML = '<option value="">Write my own brief</option>' + PLAYBOOKS.map(p => `<option value="${p.id}">${escapeHTML(p.label)}</option>`).join('');
+  $('playbook').onchange = () => {
+    const chosen = PLAYBOOKS.find(p => p.id === $('playbook').value);
+    $('playbook-note').classList.toggle('hidden', !chosen);
+    if (!chosen) return;
+    $('playbook-note').textContent = `${chosen.summary} Edit the brief before you start; it is yours now.`;
+    // A clone's folder carries the owner as well, so the brief uses the repository's own name when this is that clone.
+    const info = state.workspaceInfo || {}, repo = state.repo?.path === $('workspace-path').value.trim() ? state.repo : null;
+    $('prompt').value = buildPlaybook(chosen.id, { name: repo?.name || info.name || '', head: info.head || repo?.head || '', origin: repo?.url || info.origin || '' });
+    $('prompt').dispatchEvent(new Event('input')); $('prompt').focus();
+    if (!levelValue()) { document.querySelector('input[name=workspace-level][value=read-only]').checked = true; workspaceLevelChanged(); toast('Level set to read-only so members can read the code.'); }
+  };
+}
 $('workspace-browse').onclick = () => { if (!$('browser').classList.contains('hidden')) return $('browser').classList.add('hidden'); browseTo($('workspace-path').value.trim() || state.workspaceConfig?.browseStart || ''); };
 $('budget-save').onclick = async () => { try { const { maxScore } = await api('/api/workspace/budget', 'POST', { maxScore: $('workspace-budget').value.trim() === '' ? null : Number($('workspace-budget').value) }); state.workspaceConfig = { ...(state.workspaceConfig || {}), maxScore }; toast(maxScore === null ? 'Budget cleared.' : `Levels scoring above ${maxScore} will be refused.`); } catch (error) { toast(error.message); } };
 $('workspace-inspect').onclick = async () => {
@@ -681,7 +713,7 @@ $('reuse').onclick = () => { const prompt = currentRun.prompt; newDiscussion(); 
     if (draft.workspacePath) $('workspace-path').value = draft.workspacePath; if (draft.workspaceChecks) $('workspace-checks').value = draft.workspaceChecks;
     try { state.workspaceConfig = await api('/api/workspace'); } catch { state.workspaceConfig = {}; }
     workspaceSetup();
-    documentsSetup(); try { state.attachments = (await api('/api/attachments')).staged; } catch { state.attachments = []; } renderAttachments(); updateEstimate();
+    documentsSetup(); playbookSetup(); try { state.attachments = (await api('/api/attachments')).staged; } catch { state.attachments = []; } renderAttachments(); updateEstimate();
     $('char-count').textContent = `${$('prompt').value.length.toLocaleString()} / 24,000`;
     renderHistory(); const active = state.runs.find(r => r.status === 'running'); if (active) await loadRun(active.id);
   }

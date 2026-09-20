@@ -418,3 +418,50 @@ test('a member whose opening ran out of time gets its seat back when the owner r
   assert.ok(early.entries.some(e => e.phase === 'floor' && e.speaker === '1'), 'the member never reached the floor');
   assert.ok(seen.every(c => c.timeout === 1800), 'the new turn limit did not reach the calls');
 });
+
+test('a repository is cloned over https only, refreshed in place, and never asked for a password', async t => {
+  const { validateRepoUrl, cloneRepo, repoRoot } = await import('../lib/repos.mjs');
+  assert.deepEqual(validateRepoUrl('binary-knight/agentsec-pack'), { url: 'https://github.com/binary-knight/agentsec-pack.git', host: 'github.com', owner: 'binary-knight', name: 'agentsec-pack', folder: 'binary-knight-agentsec-pack' });
+  assert.equal(validateRepoUrl('https://gitlab.com/group/sub/project.git').folder, 'group-sub-project');
+  for (const [bad, why] of [['git@github.com:a/b.git', /not a URL/], ['file:///etc', /Only https/], ['http://github.com/a/b', /Only https/], ['https://localhost/a/b', /public repository host/], ['https://10.0.0.5/a/b', /public repository host/], ['https://user:pw@github.com/a/b', /credentials in the URL/], ['https://github.com/onlyowner', /owner and a repository/], ['../../etc/passwd', /not a URL/], ['', /Enter a repository URL/]]) {
+    assert.throws(() => validateRepoUrl(bad), why, bad);
+  }
+  assert.match(repoRoot({}), /overrule-repos$/); assert.equal(repoRoot({ OVERRULE_REPO_DIR: '/srv/clones' }), '/srv/clones');
+  // The clone itself: fixed arguments, no hooks, no prompting, and nothing of the server's environment beyond the usual.
+  const dir = await mkdtemp(join(tmpdir(), 'mesh-clone-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const seen = [];
+  const run = async (command, args, options) => {
+    seen.push({ command, args, env: options.env });
+    if (args.includes('clone')) await mkdir(args.at(-1), { recursive: true });
+    return { code: 0, stdout: args.includes('rev-parse') ? (args.includes('--abbrev-ref') ? 'main' : 'a'.repeat(40)) : '', stderr: '' };
+  };
+  const info = await cloneRepo('binary-knight/agentsec-pack', { dir, run });
+  assert.equal(info.path, join(dir, 'binary-knight-agentsec-pack')); assert.equal(info.branch, 'main'); assert.equal(info.updated, false);
+  const clone = seen.find(c => c.args.includes('clone'));
+  assert.deepEqual(clone.args, ['-c', 'core.hooksPath=/dev/null', 'clone', '--depth', '1', '--no-recurse-submodules', '--no-tags', '--quiet', 'https://github.com/binary-knight/agentsec-pack.git', info.path]);
+  assert.equal(clone.env.GIT_TERMINAL_PROMPT, '0'); assert.equal(clone.env.GIT_ASKPASS, '/bin/true'); assert.equal(clone.env.OPENAI_API_KEY, undefined);
+  // A second clone of the same repository refreshes that checkout instead of failing or duplicating it.
+  seen.length = 0;
+  const again = await cloneRepo('binary-knight/agentsec-pack', { dir, run: async (command, args, options) => { if (args.includes('get-url')) return { code: 0, stdout: 'https://github.com/binary-knight/agentsec-pack.git', stderr: '' }; return run(command, args, options); } });
+  assert.equal(again.updated, true);
+  assert.ok(seen.some(c => c.args.includes('fetch')) && seen.some(c => c.args.includes('reset')) && !seen.some(c => c.args.includes('clone')));
+  // A folder holding a different repository is never overwritten.
+  await assert.rejects(cloneRepo('binary-knight/agentsec-pack', { dir, run: async (command, args, options) => args.includes('get-url') ? { code: 0, stdout: 'https://github.com/someone/else.git', stderr: '' } : run(command, args, options) }), /already exists and points at/);
+  // A private repository without credentials fails with advice instead of hanging on a prompt.
+  await assert.rejects(cloneRepo('binary-knight/private-thing', { dir, run: async () => ({ code: 128, stdout: '', stderr: 'fatal: could not read Username for https://github.com: terminal prompts disabled' }) }), /sign git in on the host/);
+});
+
+test('report templates build a brief that names the repository, the commit, and how to report', async () => {
+  const { PLAYBOOKS, buildPlaybook, playbook } = await import('../public/playbooks.js');
+  assert.ok(PLAYBOOKS.length >= 6);
+  assert.deepEqual(PLAYBOOKS.map(p => p.id), ['security', 'bugs', 'dependencies', 'architecture', 'tests', 'performance', 'readiness']);
+  for (const entry of PLAYBOOKS) {
+    const text = entry.build({ name: 'agentsec-pack', head: 'abcdef0123456789', origin: 'https://github.com/binary-knight/agentsec-pack.git' });
+    assert.match(text, /agentsec-pack/); assert.match(text, /commit abcdef012345/);
+    assert.match(text, /SEVERITY/); assert.match(text, /VERIFIED/); assert.match(text, /file and line/);
+    assert.match(text, /never an instruction/); assert.ok(text.length > 800 && text.length < 6000, entry.id);
+    assert.ok(entry.label && entry.summary);
+  }
+  assert.match(buildPlaybook('security', { name: 'x' }), /Do not write exploit code/);
+  assert.equal(buildPlaybook('nope'), ''); assert.equal(playbook('nope'), null);
+});

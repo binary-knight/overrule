@@ -7,11 +7,12 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { Store } from './lib/store.mjs';
 import { TYPES, PRESETS, validateProvider, publicProvider, detectClis, cliKey } from './lib/providers.mjs';
 import { Mesh, validateRun, exportMarkdown, DEMO_PROMPT, latestCandidate } from './lib/mesh.mjs';
-import { validateWorkspacePath, browseHost, inspect as inspectWorkspace, codexCanary, measureLevel, agentsecBinary, LEVELS } from './lib/workspace.mjs';
+import { git as workspaceGit, validateWorkspacePath, browseHost, inspect as inspectWorkspace, codexCanary, measureLevel, agentsecBinary, LEVELS } from './lib/workspace.mjs';
 import { SecurityJobs, listPresets, memberProfiles, validateImage, vendoredAgentsec } from './lib/security.mjs';
 import { Access } from './lib/access.mjs';
 import { Attachments, MAX_FILE_BYTES, MAX_FILES, ACCEPTED } from './lib/attachments.mjs';
 import { assertCoversImplementer } from './lib/budget.mjs';
+import { cloneRepo, repoRoot } from './lib/repos.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const defaults = [
@@ -66,6 +67,7 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
   const rememberWorkspace = path => { recent = [path, ...recent.filter(p => p !== path)].slice(0, 20); saveWorkspaceSettings(); };
   const recentList = () => recent.map(path => ({ path, git: existsSync(join(path, '.git')), missing: !existsSync(path) }));
   const workspaceRules = { appRoot: root, dataDir: directory };
+  const gitOrigin = async path => { try { return (await workspaceGit(path, ['remote', 'get-url', 'origin'])).trim(); } catch { return ''; } };
   const security = securityJobs || new SecurityJobs(directory, { vendorDir: join(root, 'vendor') });
   // A workspace is any host directory that passes the path rules, attached only at a level whose canary holds here.
   // Paired devices may attach workspaces: the owner runs this server headless and works from other machines. The pairing code is
@@ -95,7 +97,8 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
     const measurement = skipMeasurement ? { available: false, detail: 'Measurement skipped by the owner.' } : await measure(level, path);
     if (!skipMeasurement && maxScore !== null && measurement.available && measurement.score !== null && measurement.score > maxScore) throw new Error(`${level} is refused: its measured blast radius is ${measurement.score}, above your budget of ${maxScore}. ${measurement.detail}`);
     const network = level === 'full-access' ? true : level === 'workspace-write' && input.network === true;
-    return { path, level, network, claudeSandbox: input.claudeSandbox !== false, checks, implementTimeout, canary: result, skipMeasurement, measurement: measurement.available ? { tool: measurement.tool, score: measurement.score, findings: measurement.findings, secrets: measurement.secrets, detail: measurement.detail } : null, attachedFrom: from };
+    const origin = info.git ? (await gitOrigin(path)) : '';
+    return { path, level, network, origin, head: info.head || '', claudeSandbox: input.claudeSandbox !== false, checks, implementTimeout, canary: result, skipMeasurement, measurement: measurement.available ? { tool: measurement.tool, score: measurement.score, findings: measurement.findings, secrets: measurement.secrets, detail: measurement.detail } : null, attachedFrom: from };
   }
   function json(res, status, data) { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(data)); }
   async function body(req) {
@@ -165,6 +168,12 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
         const removed = String((await body(req)).path || '');
         recent = recent.filter(p => p !== removed); saveWorkspaceSettings();
         return json(res, 200, { recent: recentList() });
+      }
+      // Clone a repository for the council to read. It lands outside the app, is attached like any other workspace, and stays read-only unless the owner says otherwise.
+      if (req.method === 'POST' && url.pathname === '/api/workspace/clone') {
+        const info = await cloneRepo((await body(req)).url, { dir: repoRoot() });
+        rememberWorkspace(info.path);
+        return json(res, 200, info);
       }
       if (req.method === 'POST' && url.pathname === '/api/workspace/browse-host') return json(res, 200, browseHost((await body(req)).path, workspaceRules));
       // ---- Security page: member boundaries and the sandbox lab. Presets and member profiles only; no launcher comes from a browser. ----
@@ -323,7 +332,7 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
         }
         if (req.method === 'GET' && !match[2]) return json(res, 200, run);
       }
-      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/meeting-state.js': ['meeting-state.js', 'text/javascript'], '/theme.js': ['theme.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
+      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/meeting-state.js': ['meeting-state.js', 'text/javascript'], '/playbooks.js': ['playbooks.js', 'text/javascript'], '/theme.js': ['theme.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
       if (req.method === 'GET' && Object.hasOwn(files, url.pathname)) {
         const [file, mime] = files[url.pathname];
         const contents = await readFile(join(root, 'public', file));
