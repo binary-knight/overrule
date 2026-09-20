@@ -81,6 +81,8 @@ Drop files on the brief or press **Attach files**, from any paired device. The h
 
 Paste a repository address in the Workspace section and press **Clone and attach**. The clone is shallow, lands in `~/overrule-repos` (set `OVERRULE_REPO_DIR` to move it), and is attached read-only. Cloning the same repository again refreshes that checkout in place. Only `https` addresses are accepted, so nothing reaches for this machine's ssh keys or a local path, and git is never allowed to ask for a password: a private repository fails quickly unless git is already signed in on the host.
 
+**Private repositories** work when the host's git can already read them, because the clone runs as the account that runs the app and uses that account's git credentials. On a machine with the GitHub CLI, `gh auth login` followed by `gh auth setup-git` is enough; any credential helper does. The app stores no token of its own, and whatever that account can read, the council can read. If git cannot read the repository, the clone stops with git's own reason and a pointer to signing in.
+
 Once a workspace is attached, **Start from a report template** fills the brief with one of seven reviews: security, correctness bugs, dependencies and supply chain, architecture, test coverage, performance, and release readiness. Each asks for a report the owner can act on, with findings tied to a file and a line, quoted evidence, an agreed severity, and an explicit list of what nobody looked at. Edit the text before you start; it is your brief.
 
 The commit under review is named in every prompt, in the meeting header, and in the Markdown export, so a report always says what it was about. A candidate applied to a clone changes that local clone only; nothing is pushed back.
