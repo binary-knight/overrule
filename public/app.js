@@ -291,7 +291,7 @@ function renderEntry(run, e) {
     extras += `<div class="candidate"><div><b>Candidate commit ${escapeHTML(c.hash.slice(0, 12))}</b> on ${escapeHTML(c.branch)}${c.changed ? '' : ' <span class="warn">(no file changes)</span>'}${c.artifact ? `. <a href="/api/runs/${run.id}/patch">Download patch</a>` : ''}</div>${c.files.length ? `<ul class="files">${c.files.map(fi => `<li><code>${escapeHTML(fi.status)}</code> ${escapeHTML(fi.path)}</li>`).join('')}</ul>` : ''}${c.patch ? `<details><summary>Patch (${c.bytes.toLocaleString()} bytes)</summary><pre>${escapeHTML(c.patch)}</pre></details>` : ''}${c.checks.length ? c.checks.map(k => `<details${k.code === 0 ? '' : ' open'}><summary>$ ${escapeHTML(k.command)} → ${k.code === 0 ? 'passed' : k.code === null ? 'could not run' : `exit ${k.code}`} (${k.seconds}s)</summary><pre>${escapeHTML(k.output)}</pre></details>`).join('') : ''}${checkNote ? `<div class="warn">${checkNote}</div>` : ''}</div>`;
   }
   if (e.actions?.length) extras += `<details class="activity"><summary>Activity: ${e.actions.length} tool event${e.actions.length === 1 ? '' : 's'}</summary><ul>${e.actions.map(a => `<li><code>${escapeHTML(a.type)}</code> ${a.command ? escapeHTML(a.command) : ''}${a.exitCode !== undefined && a.exitCode !== null ? ` → exit ${a.exitCode}` : ''}${a.paths?.length ? `, ${a.paths.map(escapeHTML).join(', ')}` : ''}</li>`).join('')}</ul></details>`;
-  return `<article class="card msg ${e.speaker === 'owner' ? 'owner' : ''} ${e.reconvene || e.adjust ? 'reconvene' : ''} ${e.status} ${e.superseded ? 'superseded' : ''}" id="entry-${escapeHTML(e.id)}" data-entry="${escapeHTML(e.id)}" tabindex="-1"><header><span class="entry-status ${e.status}">${icon}</span><strong>${escapeHTML(who(run, e.speaker))}</strong><span>${entryTag(run, e)}${e.addressedOwner ? ', answering you' : ''}</span>${chips.join('')}<small>${escapeHTML(e.id)}, ${e.status === 'running' ? 'speaking' : e.status}, ${elapsed(e)}</small></header><div class="msg-body">${e.text ? markdown(e.text) : `<p>${escapeHTML(e.error || 'Speaking…')}</p>`}${meta.map(m => `<p class="entry-meta">${m}</p>`).join('')}${extras}</div></article>`;
+  return `<article class="card msg ${e.speaker === 'owner' ? 'owner' : ''} ${e.reconvene || e.adjust ? 'reconvene' : ''} ${e.status} ${e.superseded ? 'superseded' : ''}" id="entry-${escapeHTML(e.id)}" data-entry="${escapeHTML(e.id)}" tabindex="-1"><header><span class="entry-status ${e.status}">${icon}</span><strong>${escapeHTML(who(run, e.speaker))}</strong><span>${entryTag(run, e)}${e.addressedOwner ? ', answering you' : ''}</span>${chips.join('')}<small>${escapeHTML(e.id)}, ${e.status === 'running' ? 'speaking' : e.status}, <span class="entry-elapsed" data-started="${e.status === 'running' && e.startedAt ? escapeHTML(e.startedAt) : ''}">${elapsed(e)}</span></small></header><div class="msg-body">${e.text ? markdown(e.text) : `<p>${escapeHTML(e.error || 'Speaking…')}</p>`}${meta.map(m => `<p class="entry-meta">${m}</p>`).join('')}${extras}</div></article>`;
 }
 function entryLink(run, id, label = id) {
   return run.entries.some(e => e.id === id) ? `<a href="#entry-${encodeURIComponent(id)}" data-jump-entry="${escapeHTML(id)}">${escapeHTML(label)}</a>` : escapeHTML(label);
@@ -321,7 +321,20 @@ function renderUsage(run) {
   const seconds = Math.floor(elapsedBudget(run) / 1000), time = `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
   $('usage').textContent = run.budget ? `Session ${run.session || 1}: ${callsUsed(run)} / ${run.budget.maxCalls} calls · ${time} / ${run.budget.maxDurationSeconds / 60} min${run.session > 1 ? ` · ${callsUsed(run, true)} calls overall` : ''}${tokens ? ` · ${tokens.toLocaleString()} reported tokens overall` : ''}` : `${callsUsed(run, true)} calls${tokens ? ` · ${tokens.toLocaleString()} reported tokens` : ''}`;
 }
-setInterval(() => { if (currentRun?.status === 'running') renderUsage(currentRun); }, 1000);
+// The server publishes only when something changes, so a long turn would otherwise look frozen. Tick the clocks here instead.
+setInterval(() => {
+  try {
+    if (currentRun?.status !== 'running') return;
+    renderUsage(currentRun);
+    for (const span of document.querySelectorAll('.entry-elapsed[data-started]:not([data-started=""])')) {
+      span.textContent = `${Math.max(0, Math.round((Date.now() - new Date(span.dataset.started)) / 1000))}s`;
+    }
+    const waiting = currentRun.entries.filter(e => e.status === 'running');
+    const longest = waiting.reduce((worst, e) => Math.max(worst, Date.now() - new Date(e.startedAt)), 0) / 1000;
+    $('run-note').classList.toggle('hidden', !waiting.length);
+    if (waiting.length) $('run-note').textContent = `Waiting on ${waiting.map(e => e.name).join(', ')} for ${Math.round(longest)}s of the ${currentRun.timeoutSeconds}s allowed for a turn.${currentRun.deepResearch && longest > 60 ? ' Deep research searches the web before answering, which takes minutes.' : ''}`;
+  } catch (error) { console.error('clock', error); }
+}, 1000);
 document.addEventListener('click', event => {
   const link = event.target.closest('[data-jump-entry]');
   if (!link || !currentRun) return;
@@ -412,6 +425,7 @@ function fillAdjustForm(run) {
     adjustLevelChanged();
   }
   $('adjust-research').checked = run.research === true; $('adjust-deep-research').checked = run.deepResearch === true;
+  $('adjust-timeout-seconds').value = run.timeoutSeconds;
   $('adjust-cycles').value = String(run.cycles); $('adjust-revisions').value = String(run.maxRevisions ?? 1);
   $('adjust-cycles-hint').classList.toggle('hidden', run.stopReason !== 'budget');
   if (run.budget) { $('resume-max-calls').value = run.budget.maxCalls; $('resume-duration').value = Math.ceil(run.budget.maxDurationSeconds / 60); }
@@ -429,11 +443,16 @@ function adjustLevelChanged() {
 }
 document.querySelectorAll('input[name=adjust-level]').forEach(input => input.onchange = adjustLevelChanged);
 // Deep research needs the web: ticking it turns internet research on, and turning that off turns deep research off with it.
-function linkResearch(web, deep) {
-  $(deep).onchange = () => { if ($(deep).checked) $(web).checked = true; saveDraft(); };
+function linkResearch(web, deep, timeout) {
+  $(deep).onchange = () => {
+    if ($(deep).checked) $(web).checked = true;
+    // Searching before answering takes minutes, not seconds; a three-minute turn limit cuts the member off mid-search.
+    if ($(deep).checked && timeout && Number($(timeout).value) < 900) { $(timeout).value = 900; toast('Turn limit raised to 15 minutes: deep research needs minutes per turn.'); }
+    saveDraft();
+  };
   $(web).onchange = () => { if (!$(web).checked) $(deep).checked = false; saveDraft(); };
 }
-linkResearch('research', 'deep-research'); linkResearch('adjust-research', 'adjust-deep-research');
+linkResearch('research', 'deep-research', 'timeout'); linkResearch('adjust-research', 'adjust-deep-research', 'adjust-timeout-seconds');
 function watchRun(run) {
   events?.close(); renderRun(run); selectTab(['complete', 'limited'].includes(run.status) ? 'answer' : 'transcript');
   if (run.status !== 'running') return;
@@ -628,7 +647,7 @@ $('limit-form').addEventListener('submit', async event => {
   const ws = currentRun.workspace;
   const payload = {
     maxCalls: Number($('resume-max-calls').value), maxDurationSeconds: Number($('resume-duration').value) * 60,
-    cycles: Number($('adjust-cycles').value), revisions: Number($('adjust-revisions').value), research: $('adjust-research').checked, deepResearch: $('adjust-deep-research').checked, note: $('adjust-note').value.trim(),
+    cycles: Number($('adjust-cycles').value), revisions: Number($('adjust-revisions').value), research: $('adjust-research').checked, deepResearch: $('adjust-deep-research').checked, timeoutSeconds: Number($('adjust-timeout-seconds').value), note: $('adjust-note').value.trim(),
   };
   if (ws) payload.workspace = {
     level: adjustLevel(), network: $('adjust-network').checked, claudeSandbox: $('adjust-claude-sandbox').checked,

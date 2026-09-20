@@ -287,7 +287,7 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
           if (match[2] === 'resume') {
             const note = String(input.note || '').trim();
             if (note.length > 4000) throw new Error('Keep the note to the council under 4,000 characters.');
-            changes = { note, cycles: input.cycles === undefined ? undefined : Number(input.cycles), maxRevisions: input.revisions === undefined ? undefined : Number(input.revisions), research: typeof input.research === 'boolean' ? input.research : undefined, deepResearch: typeof input.deepResearch === 'boolean' ? input.deepResearch : undefined };
+            changes = { note, cycles: input.cycles === undefined ? undefined : Number(input.cycles), maxRevisions: input.revisions === undefined ? undefined : Number(input.revisions), research: typeof input.research === 'boolean' ? input.research : undefined, deepResearch: typeof input.deepResearch === 'boolean' ? input.deepResearch : undefined, timeoutSeconds: input.timeoutSeconds === undefined ? undefined : Number(input.timeoutSeconds) };
             if (input.workspace) {
               if (!run.workspace) throw new Error('This meeting has no workspace. Reconvene it or start a new meeting to attach one.');
               changes.workspace = await parseWorkspace({ ...input.workspace, path: run.workspace.path }, { participants, drafterId: run.drafterId }, local ? 'localhost' : String(req.socket.remoteAddress || 'lan'));

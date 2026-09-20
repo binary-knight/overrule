@@ -387,3 +387,34 @@ test('pause stops between steps, keeps the call in flight, and resumes under new
   assert.match(owner.text, /internet research on: members may search the web/); assert.match(owner.text, /Research it properly now\./);
   assert.equal(run.record.verdict.code, 'approved');
 });
+
+test('a member whose opening ran out of time gets its seat back when the owner resumes before the floor speaks', async t => {
+  const store = new Store(await mkdtemp(join(tmpdir(), 'mesh-slow-'))); t.after(() => rm(store.directory, { recursive: true, force: true }));
+  let slow = true; const seen = [];
+  const mesh = new Mesh(store, async (provider, request) => {
+    const phase = phaseOf(request.prompt); seen.push({ name: provider.name, phase, timeout: request.timeoutSeconds });
+    if (phase === 'opening' && provider.id === '1' && slow) throw new Error('Timed out after 180 seconds.');
+    return { text: reply(phase) };
+  });
+  const run = mesh.create({ ...options, participants: [...members.slice(0, 3)], cycles: 1, timeoutSeconds: 180 });
+  await finished(mesh, run);
+  // The meeting carried on without the slow member, as it should: two members is a quorum.
+  assert.equal(run.status, 'complete');
+  assert.equal(run.entries.filter(e => e.phase === 'opening' && e.status === 'failed').length, 1);
+  assert.equal(run.entries.some(e => e.phase === 'floor' && e.speaker === '1'), false);
+  // Now the same meeting stopped before the floor spoke: raising the turn limit brings the slow member back.
+  const early = mesh.create({ ...options, participants: [...members.slice(0, 3)], cycles: 1, timeoutSeconds: 180 });
+  await finished(mesh, early);
+  early.entries = early.entries.filter(e => e.phase === 'opening');
+  Object.assign(early, { status: 'cancelled', stopReason: null, phase: 'opening', final: '', record: null });
+  slow = false; seen.length = 0;
+  mesh.resume(early, members.slice(0, 3), {}, { timeoutSeconds: 1800 });
+  const owner = early.entries.filter(e => e.speaker === 'owner').at(-1);
+  assert.match(owner.text, /time limit for one member's turn 180 to 1800 seconds/);
+  assert.match(owner.text, /Beta writes an opening position after all/);
+  await finished(mesh, early);
+  assert.equal(early.status, 'complete', early.error);
+  assert.equal(early.entries.filter(e => e.phase === 'opening' && e.status === 'complete' && e.speaker === '1').length, 1);
+  assert.ok(early.entries.some(e => e.phase === 'floor' && e.speaker === '1'), 'the member never reached the floor');
+  assert.ok(seen.every(c => c.timeout === 1800), 'the new turn limit did not reach the calls');
+});
