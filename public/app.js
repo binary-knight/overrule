@@ -177,6 +177,18 @@ async function browseTo(path) {
     $('browser-entries').querySelectorAll('[data-path]').forEach(b => b.onclick = () => browseTo(b.dataset.path));
   } catch (error) { toast(error.message); }
 }
+// Staging a document that is already on the host: the file never passes through the browser.
+async function attachWorkspaceDocuments(documents) {
+  state.attachments ||= [];
+  for (const doc of documents) {
+    if (state.attachments.some(a => a.name === doc.name)) continue;
+    const pending = { name: doc.name, size: doc.size, uploading: true }; state.attachments.push(pending); renderAttachments();
+    try { Object.assign(pending, await api('/api/attachments/from-workspace', 'POST', { workspace: $('workspace-path').value.trim(), path: doc.path }), { uploading: false }); }
+    catch (error) { state.attachments = state.attachments.filter(a => a !== pending); toast(error.message); }
+    renderAttachments(); updateEstimate();
+  }
+  if (state.workspaceInfo) renderWorkspaceInfo(state.workspaceInfo);
+}
 function workspaceLevelChanged() {
   const level = levelValue(), info = state.workspaceInfo;
   const levelNames = { 'read-only': 'Read-only tools', 'workspace-write': 'Workspace-write', 'full-access': 'Full access' };
@@ -195,6 +207,10 @@ function renderWorkspaceInfo(info) {
   const lines = [];
   lines.push(info.git ? `<span class="ok">Git repository</span> on branch <b>${escapeHTML(info.branch)}</b> at ${escapeHTML((info.head || '').slice(0, 10))}${info.dirty ? `, <span class="warn">${info.dirtyFiles.length} uncommitted change${info.dirtyFiles.length === 1 ? '' : 's'}</span>` : ', clean'}` : `<span class="warn">Not a git repository root</span>, so read-only only`);
   if (info.secrets?.length) lines.push(`<span class="warn">Looks like secrets:</span> ${info.secrets.slice(0, 6).map(escapeHTML).join(', ')}${info.secrets.length > 6 ? ', …' : ''}`);
+  // A Word or PDF file in the tree is binary. A member with a shell can unzip one; a member without one cannot read it at all.
+  // Attaching it puts its text in every member's prompt, which is the only way the whole council reads the same thing.
+  var documents = (info.documents || []).filter(doc => !(state.attachments || []).some(a => a.name === doc.name));
+  if (documents.length) lines.push(`<span class="warn">${documents.length} document${documents.length === 1 ? '' : 's'} no member can read without a shell:</span> ${documents.map((doc, i) => `<button type="button" class="text-button" data-attach-doc="${i}">${escapeHTML(doc.name)}</button>`).join(', ')} — <button type="button" class="text-button" data-attach-doc="all"><b>attach ${documents.length === 1 ? 'it' : 'all'}</b></button>`);
   for (const [level, c] of Object.entries(info.canaries || {})) {
     lines.push(`<span class="${c.ok ? 'ok' : 'bad'}">${escapeHTML(level)}:</span> ${escapeHTML(c.detail)}`);
     const m = info.measurements?.[level];
@@ -207,6 +223,10 @@ function renderWorkspaceInfo(info) {
     } else if (m) lines.push(`&nbsp;&nbsp;<span class="warn">${escapeHTML(m.detail)}</span>`);
   }
   $('workspace-info').innerHTML = lines.join('<br>'); $('workspace-info').classList.remove('hidden');
+  $('workspace-info').querySelectorAll('[data-attach-doc]').forEach(button => button.onclick = () => {
+    const which = button.dataset.attachDoc;
+    attachWorkspaceDocuments(which === 'all' ? documents : [documents[Number(which)]]);
+  });
   document.querySelectorAll('input[name=workspace-level]').forEach(input => {
     const allowed = !input.value || Boolean(info.canaries?.[input.value]?.ok);
     input.disabled = !allowed; input.closest('.level').classList.toggle('disabled', !allowed);

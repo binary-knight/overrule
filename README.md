@@ -105,6 +105,8 @@ Paste a repository address in the Workspace section and press **Clone and attach
 
 **Private repositories** work when the host's git can already read them, because the clone runs as the account that runs the app and uses that account's git credentials. On a machine with the GitHub CLI, `gh auth login` followed by `gh auth setup-git` is enough; any credential helper does. The app stores no token of its own, and whatever that account can read, the council can read. If git cannot read the repository, the clone stops with git's own reason and a pointer to signing in.
 
+Inspect also names any Word, PDF, spreadsheet or slide file in the workspace, because those are binary: a member with a shell can unzip one, a member without one cannot read it at all. One click attaches them, which puts their text in every member's prompt, so the whole council reads the same thing.
+
 Once a workspace is attached, **Start from a report template** fills the brief with one of seven reviews: security, correctness bugs, dependencies and supply chain, architecture, test coverage, performance, and release readiness. Each asks for a report the owner can act on, with findings tied to a file and a line, quoted evidence, an agreed severity, and an explicit list of what nobody looked at. Edit the text before you start; it is your brief.
 
 The commit under review is named in every prompt, in the meeting header, and in the Markdown export, so a report always says what it was about. A candidate applied to a clone changes that local clone only; nothing is pushed back.
@@ -114,7 +116,7 @@ The commit under review is named in every prompt, in the meeting header, and in 
 By default no member touches your machine: CLI members run in an empty temporary directory with tools off, and API members have no tools. To let the council work on code, browse to a project folder in the **Workspace** section, press **Inspect**, and choose a level:
 
 - **Talk only.** Nothing runs.
-- **Read-only tools.** Codex members read and run commands inside Codex's operating-system sandbox with writes and network blocked. Claude Code members read and search files with no shell.
+- **Read-only tools.** Every member with tools gets the same thing: files to read and a shell to run commands in, with writes and network blocked. Codex members run inside Codex's own sandbox. Claude Code members run inside Claude Code's sandbox, in a scratch directory, so the workspace is readable and unwritable; if that sandbox cannot start on the machine the turn fails rather than running loose, and unticking the sandbox option drops those members back to reading files without a shell.
 - **Workspace-write.** Needs a git repository with a clean tree. The floor stays read-only. After it closes, the drafter implements in an isolated `git worktree` on a `mesh/<id>` branch inside its sandbox, with network off unless you allow it. The app commits what it left behind as the candidate, runs your check commands on that commit in a disposable checkout, and gives voters the diff, the check output, and a clean checkout to inspect. **Apply** merges the exact recorded commit into your branch; **Discard** deletes it.
 - **Full access.** No boundary. Every member with tools can do anything your account can do, every turn, including reading this app's saved keys and your credential files. Offered because it is your machine, behind an acknowledgement for every meeting, shown in red.
 

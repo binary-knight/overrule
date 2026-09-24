@@ -796,7 +796,10 @@ test('the prompt states each member’s real access for the turn, and the budget
   const access = run => thread(run).split('\n\n').find(block => block.startsWith('ACCESS THIS TURN'));
   assert.equal(access(base), 'ACCESS THIS TURN\n- Codex: no file tools.\n- Claude Code: no file tools.\n- Sol: no file tools.\nThe drafter (Codex) writes the candidate as text at the draft step.');
   const write = access({ ...base, workspace: { name: 'w', level: 'workspace-write', branch: 'overrule/abc', network: false } });
-  assert.match(write, /- Codex: reads files and runs commands in a read-only sandbox; cannot write files\./); assert.match(write, /- Claude Code: reads and searches files; no shell, cannot run commands or write files\./); assert.match(write, /- Sol: no file tools; relies on what others quote\./);
+  assert.match(write, /- Codex: reads files and runs commands in a read-only sandbox; cannot write files\./); assert.match(write, /- Claude Code: reads files and runs commands in its own sandbox, which cannot write to the workspace/);
+  // Turning the Claude sandbox off takes the shell with it: an unsandboxed shell at read-only would not be read-only.
+  const unsandboxed = access({ ...base, workspace: { name: 'w', level: 'workspace-write', branch: 'overrule/abc', network: false, claudeSandbox: false } });
+  assert.match(unsandboxed, /- Claude Code: reads and searches files; no shell, cannot run commands or write files\./); assert.match(write, /- Sol: no file tools; relies on what others quote\./);
   assert.match(write, /Only the drafter \(Codex\) writes files, at the draft step after the floor closes, in its own checkout of branch overrule\/abc with a shell, no network/); assert.match(write, /Do not ask who holds write access/);
   assert.match(access({ ...base, workspace: { name: 'w', level: 'read-only' } }), /Nobody writes files at this level/);
   assert.match(access({ ...base, workspace: { name: 'w', level: 'full-access', branch: 'overrule/abc' } }), /- Codex: full access on this machine, every turn\./);
@@ -805,6 +808,7 @@ test('the prompt states each member’s real access for the turn, and the budget
   const researching = access({ ...base, research: true, workspace: { name: 'w', level: 'read-only' } });
   assert.match(researching, /- Codex: reads files and runs commands in a read-only sandbox; cannot write files; searches the web through Codex\./);
   assert.match(researching, /- Claude Code: .*; searches the web but cannot fetch a page directly\./);
+  assert.match(researching, /read the workspace at/);
   assert.match(researching, /- Sol: no file tools; cannot browse; it relies on what others quote\./);
   assert.match(researching, /Internet research is on: cite every external fact with its source and date\./);
   assert.doesNotMatch(researching, /Deep research is on/);

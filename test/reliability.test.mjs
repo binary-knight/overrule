@@ -465,3 +465,39 @@ test('report templates build a brief that names the repository, the commit, and 
   assert.match(buildPlaybook('security', { name: 'x' }), /Do not write exploit code/);
   assert.equal(buildPlaybook('nope'), ''); assert.equal(playbook('nope'), null);
 });
+
+test('a Claude member reading a workspace gets a shell that cannot write to it', async t => {
+  const { claudeArgs, cliCommand } = await import('../lib/providers.mjs');
+  const shell = claudeArgs({ cwd: '/w', level: 'read-only', shell: true });
+  const tools = shell[shell.indexOf('--tools') + 1];
+  assert.equal(tools, 'Bash,Read,Glob,Grep');
+  assert.equal(claudeArgs({ cwd: '/w', level: 'read-only', shell: true, research: true })[shell.indexOf('--tools') + 1], 'Bash,Read,Glob,Grep,WebSearch,WebFetch');
+  assert.ok(shell.includes('--restricted'), 'restricted mode still applies');
+  assert.ok(!shell.includes('--disallowedTools'));
+  const settings = JSON.parse(shell[shell.indexOf('--settings') + 1]).sandbox;
+  assert.deepEqual(settings.filesystem.allowWrite, [], 'the workspace must not be writable');
+  assert.deepEqual(settings.network.allowedDomains, []);
+  assert.equal(settings.enabled, true); assert.equal(settings.failIfUnavailable, true); assert.equal(settings.allowUnsandboxedCommands, false);
+  // Without the sandbox there is no shell: an unsandboxed one would not be read-only.
+  assert.ok(claudeArgs({ cwd: '/w', level: 'read-only' }).includes('--disallowedTools'));
+  // The process runs in a scratch directory, never in the workspace, because its own working directory stays writable.
+  const root = await mkdtemp(join(tmpdir(), 'mesh-shell-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const [, args] = cliCommand('claude-cli', '', { cwd: root, level: 'read-only', shell: true });
+  assert.ok(!args.includes(root), 'the workspace path must not be handed to the CLI as a working directory');
+  assert.ok(!args.includes('--add-dir'), 'an added directory would be writable inside the sandbox');
+  assert.ok(!args.includes('-C'));
+});
+
+test('inspect names the documents no member can read without a shell', async t => {
+  const { inspect, binaryDocuments } = await import('../lib/workspace.mjs');
+  const root = await mkdtemp(join(tmpdir(), 'mesh-docs-')); t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'sub', 'deep'), { recursive: true }); await mkdir(join(root, 'node_modules'), { recursive: true }); await mkdir(join(root, '.hidden'), { recursive: true });
+  await writeFile(join(root, 'Draft.docx'), 'PK'); await writeFile(join(root, 'notes.md'), '# text');
+  await writeFile(join(root, 'sub', 'model.xlsx'), 'PK'); await writeFile(join(root, 'sub', 'deep', 'paper.pdf'), '%PDF');
+  await writeFile(join(root, 'node_modules', 'ignored.docx'), 'PK'); await writeFile(join(root, '.hidden', 'secret.pdf'), '%PDF');
+  const names = binaryDocuments(root).map(d => d.name).sort();
+  assert.deepEqual(names, ['Draft.docx', 'model.xlsx', 'paper.pdf']);
+  assert.ok(binaryDocuments(root).every(d => d.size > 0 && d.path.startsWith(root)));
+  const info = await inspect(root);
+  assert.deepEqual(info.documents.map(d => d.name).sort(), names);
+});

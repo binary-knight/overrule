@@ -2,12 +2,12 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Store } from './lib/store.mjs';
 import { TYPES, PRESETS, validateProvider, publicProvider, detectClis, cliKey } from './lib/providers.mjs';
 import { Mesh, validateRun, exportMarkdown, DEMO_PROMPT, latestCandidate } from './lib/mesh.mjs';
-import { git as workspaceGit, validateWorkspacePath, browseHost, inspect as inspectWorkspace, codexCanary, measureLevel, agentsecBinary, LEVELS } from './lib/workspace.mjs';
+import { git as workspaceGit, validateWorkspacePath, browseHost, binaryDocuments, inspect as inspectWorkspace, codexCanary, measureLevel, agentsecBinary, LEVELS } from './lib/workspace.mjs';
 import { SecurityJobs, listPresets, memberProfiles, validateImage, vendoredAgentsec } from './lib/security.mjs';
 import { Access } from './lib/access.mjs';
 import { Attachments, MAX_FILE_BYTES, MAX_FILES, ACCEPTED } from './lib/attachments.mjs';
@@ -163,6 +163,15 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
         if (Number(req.headers['content-length']) > MAX_FILE_BYTES) { req.resume(); throw new Error(`A document can be up to ${MAX_FILE_BYTES / 1024 / 1024} MB.`); }
         let name = ''; try { name = decodeURIComponent(String(req.headers['x-file-name'] || '')); } catch { throw new Error('The file name could not be read.'); }
         try { return json(res, 201, await attachments.stage(name, req)); } catch (error) { req.resume(); throw error; }
+      }
+      // Attach a document that is already in the workspace: a member without a shell cannot read a Word or PDF file itself.
+      if (req.method === 'POST' && url.pathname === '/api/attachments/from-workspace') {
+        const input = await body(req);
+        const workspace = validateWorkspacePath(input.workspace, workspaceRules);
+        const wanted = resolve(String(input.path || ''));
+        if (wanted !== workspace && !wanted.startsWith(workspace + sep)) throw new Error('That document is not inside the attached workspace.');
+        if (!binaryDocuments(workspace).some(doc => doc.path === wanted)) throw new Error('That is not a document this workspace offers. Inspect it again.');
+        return json(res, 201, await attachments.stageFile(wanted));
       }
       const staged = url.pathname.match(/^\/api\/attachments\/([0-9a-f-]{36})$/);
       if (req.method === 'DELETE' && staged) { await attachments.remove(staged[1]); return json(res, 200, { ok: true }); }
