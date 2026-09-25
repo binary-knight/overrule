@@ -4,6 +4,8 @@ A local web app where several AI models hold a meeting about your problem and ha
 
 What makes it different from a group chat is the receipts. A meeting can be pointed at a project on your machine, at an access level whose boundary the app measures before offering it. The drafter implements in an isolated checkout, the app commits what it left behind, runs the checks you named on that exact commit, and shows voters the diff and the check output. Nothing touches your working tree until you press Apply.
 
+![A finished meeting: the verdict, the votes, the objections and the quotations each member relied on](docs/screenshot.png)
+
 Runs on Node.js 22 or newer with no runtime dependencies. Models come from your own subscriptions and keys: the Codex and Claude Code CLIs signed in on the host, or API keys for OpenAI, Anthropic, Gemini, Grok, Hugging Face, and any OpenAI-compatible server such as Ollama, LM Studio, or vLLM.
 
 ## Install
@@ -149,6 +151,10 @@ npm run check
 Tests use mocked inference and spend no credits. `scripts/browser-check.mjs` is a headless smoke test that needs Playwright (`PLAYWRIGHT_MODULE` set to an installed module). `scripts/live-check.mjs` runs one real two-member meeting against a running app and spends CLI allowance.
 
 The code is small on purpose: `server.mjs` is the HTTP API, `lib/meeting.mjs` the pure meeting logic (rules, prompts, speaker order, planning), `lib/mesh.mjs` runs and persists meetings, `lib/workspace.mjs` handles paths, git isolation, canaries and measurement, `lib/attachments.mjs` handles documents, `lib/security.mjs` the Security page, `lib/providers.mjs` the model adapters, and `public/` the interface. The **Package agentsec-pack** workflow keeps the vendored agentsec-pack bundle current.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Tests and a syntax check must pass, changes carry a test, and the project stays free of runtime dependencies.
 
 ## License
 

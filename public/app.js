@@ -380,6 +380,8 @@ function renderRun(run) {
   $('floor-outcome').textContent = meeting && run.stopReason ? `Discussion closed: ${run.stopReason === 'budget' ? 'cycle budget reached' : run.stopReason}. Final candidate review is shown separately.` : '';
   $('run-prompt').textContent = run.prompt;
   $('cancel').classList.toggle('hidden', run.status !== 'running'); $('cancel').disabled = false;
+  // The waiting line belongs to a meeting in session; a finished one must not keep the last turn's clock on screen.
+  if (run.status !== 'running') $('run-note').classList.add('hidden');
   $('pause').classList.toggle('hidden', run.status !== 'running'); $('pause').disabled = Boolean(run.pauseRequested);
   $('pause').textContent = run.pauseRequested ? 'Pausing after this step' : 'Pause';
   const remaining = Math.max(0, (run.budget?.maxCalls || run.plannedCalls) - callsUsed(run));
