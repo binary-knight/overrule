@@ -6,6 +6,8 @@ What makes it different from a group chat is the receipts. A meeting can be poin
 
 ![A finished meeting: the verdict, the votes, the objections and the quotations each member relied on](docs/screenshot.png)
 
+[Watch a real meeting](https://binary-knight.com/assets/overrule-meeting.webm), sped up to 36 seconds: GPT-5.6 and two Claude models argue SQLite against Postgres for a side project, concede points, object, and vote on the final answer.
+
 Runs on Node.js 22 or newer with no runtime dependencies. Models come from your own subscriptions and keys: the Codex and Claude Code CLIs signed in on the host, or API keys for OpenAI, Anthropic, Gemini, Grok, Hugging Face, and any OpenAI-compatible server such as Ollama, LM Studio, or vLLM.
 
 ## Install
