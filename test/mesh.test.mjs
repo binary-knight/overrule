@@ -916,3 +916,18 @@ test('the neutral drafter is named in the roster and needs three members', async
   assert.match(thread(run), /- Opus — DRAFTER ONLY: does not argue or vote/);
   assert.doesNotMatch(thread(run), /Opus — NOT TAKING PART/);
 });
+
+test('the owner\'s own closing JSON block survives the draft; only the meeting\'s block is taken as fields', async () => {
+  const { splitFields, FIELD_KEYS } = await import('../lib/meeting.mjs');
+  const owner = '```json\n{"action": "correct_resubmit", "confidence": 0.7}\n```';
+  const meeting = '```json\n{"version":1,"unresolved":[],"verification":"unperformed"}\n```';
+  // Both blocks: the meeting's is removed and the owner's stays in the deliverable.
+  const both = splitFields(`Answer.\n${owner}\n${meeting}`, FIELD_KEYS.draft);
+  assert.equal(both.fields.version, 1); assert.match(both.body, /"action": "correct_resubmit"/);
+  // Only the owner's block: it is not mistaken for the meeting's and stays put.
+  const ownerOnly = splitFields(`Answer.\n${owner}`, FIELD_KEYS.draft);
+  assert.equal(ownerOnly.fields, null); assert.match(ownerOnly.body, /"action": "correct_resubmit"/);
+  // A ballot is still read, and without keys the old behaviour holds.
+  assert.equal(splitFields('ok\n```json\n{"vote":"approve","objections":[],"reason":""}\n```', FIELD_KEYS.ratify).fields.vote, 'approve');
+  assert.equal(splitFields(`x\n${owner}`).fields.action, 'correct_resubmit');
+});
