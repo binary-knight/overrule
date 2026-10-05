@@ -33,6 +33,11 @@ test('citations require an earlier completed source and a matching quotation, wi
   assert.ok(fields.invalidConcessions.every(c => c.reason));
   source.text = 'There is a check. ' + 'x'.repeat(600);
   assert.equal(citationEvidence(run, entry, [{ entry: 'e1', quote: source.text + ' invented tail' }]).valid.length, 0);
+  // Typography is not content: curly or straight quotes, and Markdown emphasis, do not make an accurate quotation false.
+  source.text = 'The member said "it is **not** a coverage dispute" and moved on.';
+  assert.equal(citationEvidence(run, entry, [{ entry: 'e1', quote: 'said \u201Cit is not a coverage dispute\u201D' }]).valid.length, 1);
+  assert.equal(citationEvidence(run, entry, [{ entry: 'e1', quote: "said 'it is not a coverage dispute'" }]).valid.length, 1);
+  assert.equal(citationEvidence(run, entry, [{ entry: 'e1', quote: 'said "it is a coverage dispute"' }]).valid.length, 0);
 });
 
 test('a fabricated concession cannot bypass the re-ask or inflate concession metrics', async t => {

@@ -89,6 +89,9 @@ test('a meeting decided by an older version is judged again, so the report and t
   assert.equal(shown.candidate, 'The sentence stands.'); assert.deepEqual(shown.members, ['Codex', 'Claude Code']); assert.equal(shown.drafter, 'Codex');
   // A caller budgeting a comparison needs what the meeting spent: four model calls, and the tokens the one reporting provider gave.
   assert.equal(shown.calls, 4); assert.deepEqual(shown.usage, { input: 120, output: 30 });
+  assert.deepEqual(shown.failedTurns, []);
+  legacy.entries.push({ id: 'e5', speaker: 'b', phase: 'floor', status: 'failed', error: 'codex exited with code 1: Selected model is at capacity.' });
+  assert.deepEqual(machineReadable(legacy, 'http://x').failedTurns, [{ member: 'Claude Code', phase: 'floor', error: 'codex exited with code 1: Selected model is at capacity.' }]);
 });
 
 test('overrule ask holds a meeting and reports its verdict, and --json is machine readable', async t => {

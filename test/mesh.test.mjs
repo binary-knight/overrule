@@ -6,7 +6,7 @@ import { join, resolve as resolvePath } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Store } from '../lib/store.mjs';
 import { Mesh, validateRun, exportMarkdown } from '../lib/mesh.mjs';
-import { callProvider, validateProvider, parseCli, cliCommand, interpretAuth, probeCli } from '../lib/providers.mjs';
+import { callProvider, validateProvider, parseCli, cliCommand, interpretAuth, probeCli, cliFailure } from '../lib/providers.mjs';
 import { createApp } from '../server.mjs';
 import http from 'node:http';
 import { Access } from '../lib/access.mjs';
@@ -186,6 +186,11 @@ test('CLI adapters parse structured events and keep prompts out of command argum
   assert.deepEqual(parseCli('codex-cli', '{"type":"item.completed","item":{"type":"agent_message","text":"a"}}\n{"type":"turn.completed","usage":{"input_tokens":9000,"cached_input_tokens":8000,"output_tokens":40}}').usage, { input: 9000, output: 40 });
   assert.throws(() => parseCli('claude-cli', '{"is_error":true,"result":"raw diagnostic"}'), /could not complete/);
   assert.throws(() => parseCli('codex-cli', '{"type":"turn.failed"}'), /could not complete/);
+  // A failed CLI says why in its own words: a model at capacity is not a sign-in problem.
+  assert.equal(cliFailure('codex', 1, '{"type":"error","message":"Selected model is at capacity. Please try a different model."}', ''), 'codex exited with code 1: Selected model is at capacity. Please try a different model.');
+  assert.match(cliFailure('codex', 1, '{"type":"turn.failed","error":{"message":"401 Unauthorized"}}', ''), /401 Unauthorized\. Check its sign-in/);
+  assert.equal(cliFailure('claude', 1, '', 'warming up\nError: usage limit reached\n'), 'claude exited with code 1: Error: usage limit reached.');
+  assert.equal(cliFailure('codex', 1, '', ''), 'codex exited with code 1. Check its sign-in in your terminal.');
   const [, args] = cliCommand('codex-cli', 'my-model'); assert.ok(args.includes('read-only')); assert.ok(args.includes('features.shell_tool=false'));
   const [, claudeArgs] = cliCommand('claude-cli', ''); assert.equal(claudeArgs[claudeArgs.indexOf('--tools') + 1], ''); assert.ok(claudeArgs.includes('--safe-mode'));
 });

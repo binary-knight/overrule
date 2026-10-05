@@ -16,7 +16,10 @@ export function candidateReady(run, candidate) {
   const commands = run.workspace?.checks || [], checks = candidate.checks || [];
   return checks.length === commands.length && commands.every((command, i) => checks[i].command === command && Number.isInteger(checks[i].code));
 }
-const quoteText = text => String(text || '').normalize('NFC').replace(/\s+/gu, ' ').trim();
+// A quotation is checked for its words, not its typography: members restyle quote marks and drop Markdown emphasis when they
+// quote, and an accurate quotation must not be rejected for that. Anything that changes the words still fails.
+const quoteText = text => String(text || '').normalize('NFKC').replace(/[\u2018\u2019\u201A\u201B\u2032`]/gu, "'").replace(/[\u201C\u201D\u201E\u201F\u2033]/gu, '"')
+  .replace(/["']/gu, '"').replace(/\*\*|__|~~|`/gu, '').replace(/(^|\s)[*_]+|[*_]+(?=\s|$|[.,;:!?])/gu, '$1').replace(/\s+/gu, ' ').trim();
 export function citationEvidence(run, entry, citations = entry.fields?.concedes || []) {
   const valid = [], invalid = [];
   for (const value of (Array.isArray(citations) ? citations : []).slice(0, 10)) {

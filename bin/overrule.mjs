@@ -190,6 +190,8 @@ export function machineReadable(run, url) {
     metrics: record.metrics || null, error: run.error || null,
     // Model calls and the tokens providers reported, across every session, counted as the interface counts them.
     calls: callsUsed(run, true),
+    // Turns that failed, by whom and why: a meeting that lost a member is not the council the caller asked for.
+    failedTurns: (run.entries || []).filter(e => e.status === 'failed' && e.speaker !== 'owner').map(e => ({ member: e.name || name(e.speaker), phase: e.phase, error: String(e.error || '').slice(0, 300) })),
     usage: (run.entries || []).reduce((sum, e) => ({ input: sum.input + (e.usage?.input || 0), output: sum.output + (e.usage?.output || 0) }), { input: 0, output: 0 }),
   };
 }
