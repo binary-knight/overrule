@@ -4,7 +4,7 @@
 import { readFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { buildPlaybook, PLAYBOOKS } from '../public/playbooks.js';
-import { assessResult, callsUsed } from '../public/meeting-state.js';
+import { assessResult, callsUsed, issueStatus, openIssuesOf } from '../public/meeting-state.js';
 
 const DEFAULT_URL = process.env.OVERRULE_URL || 'http://127.0.0.1:4310';
 const USAGE = `overrule — convene a council of models from the command line.
@@ -182,8 +182,8 @@ export function machineReadable(run, url) {
     final: run.final || '', candidate: draft?.text || '', candidateVersion: run.candidateVersion,
     ballots: (run.entries || []).filter(e => e.phase === 'ratify' && e.status === 'complete' && !e.superseded && e.candidateVersion === run.candidateVersion)
       .map(e => ({ member: e.name || name(e.speaker), vote: e.fields?.vote || 'abstain', reason: e.fields?.reason || '', objections: (e.fields?.objections || []).map(o => ({ claim: o.claim, resolvingCondition: o.condition })) })),
-    objections: (run.issues || []).map(issue => ({ id: issue.id, raisedBy: name(issue.raisedBy), against: name(issue.against), claim: issue.claim, resolvingCondition: issue.condition, status: issue.status })),
-    openObjections: (run.issues || []).filter(i => i.status === 'open').length,
+    objections: (run.issues || []).map(issue => ({ id: issue.id, raisedBy: name(issue.raisedBy), against: name(issue.against), claim: issue.claim, resolvingCondition: issue.condition, status: issueStatus(run, issue) })),
+    openObjections: openIssuesOf(run).length,
     members: (run.participants || []).map(p => p.name), drafter: name(run.drafterId),
     workspace: run.workspace ? { path: run.workspace.path, level: run.workspace.level, origin: run.workspace.origin || null, head: run.workspace.head || null } : null,
     research: Boolean(run.research), deepResearch: Boolean(run.deepResearch),

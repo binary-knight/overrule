@@ -1,4 +1,4 @@
-import { assessResult, callsUsed, elapsedBudget, estimateCalls, citationEvidence } from './meeting-state.js';
+import { assessResult, callsUsed, elapsedBudget, estimateCalls, citationEvidence, issueStatus } from './meeting-state.js';
 import { PLAYBOOKS, buildPlaybook } from './playbooks.js';
 
 const $ = id => document.getElementById(id);
@@ -426,7 +426,7 @@ function renderRun(run) {
   }
   const issues = run.issues || [];
   $('issues').classList.toggle('hidden', !meeting || !issues.length || $('transcript').classList.contains('hidden'));
-  $('issues').innerHTML = `<h3>Objections</h3>` + issues.map(i => `<div class="issue"><b>${escapeHTML(i.id)}</b><span>${escapeHTML(who(run, i.raisedBy))} → ${escapeHTML(who(run, i.against))}: “${escapeHTML(i.claim)}”<br>Resolves when ${escapeHTML(i.condition)}</span><span class="chip ${i.status === 'resolved' ? 'vote-approve' : 'vote-object'}">${i.status}</span></div>`).join('');
+  $('issues').innerHTML = `<h3>Objections</h3>` + issues.map(i => `<div class="issue"><b>${escapeHTML(i.id)}</b><span>${escapeHTML(who(run, i.raisedBy))} → ${escapeHTML(who(run, i.against))}: “${escapeHTML(i.claim)}”<br>Resolves when ${escapeHTML(i.condition)}</span><span class="chip ${issueStatus(run, i) === 'open' ? 'vote-object' : 'vote-approve'}" title="${issueStatus(run, i) === 'withdrawn' ? 'Its author voted to approve the candidate' : ''}">${issueStatus(run, i)}</span></div>`).join('');
   $('say-form').classList.toggle('hidden', !meeting || run.status !== 'running');
   $('reconvene-form').classList.toggle('hidden', !meeting || run.demo || run.status === 'running' || !run.floorStarted); $('reconvene-form').querySelector('button').disabled = false;
   $('limit-form').classList.toggle('hidden', !stopped);

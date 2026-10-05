@@ -7,7 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Store } from '../lib/store.mjs';
 import { Mesh, validateRun, exportMarkdown } from '../lib/mesh.mjs';
 import { normalizeFields, metrics } from '../lib/meeting.mjs';
-import { assessResult, callsUsed, citationEvidence, estimateCalls, elapsedBudget } from '../public/meeting-state.js';
+import { assessResult, callsUsed, citationEvidence, estimateCalls, elapsedBudget, issueStatus, openIssuesOf } from '../public/meeting-state.js';
 
 const members = ['Alpha', 'Beta', 'Gamma'].map((name, i) => ({ id: String(i), name, type: 'compatible', model: 'fixture', role: name, baseUrl: 'http://localhost:9999/v1' }));
 const options = { prompt: 'A test task', participants: members.slice(0, 2), drafterId: '0', cycles: 1, maxTokens: 4096, timeoutSeconds: 10, maxRevisions: 0 };
@@ -173,4 +173,25 @@ test('a meeting that fails before a draft is incomplete, not unsettled, even whe
   const result = assessResult(run);
   assert.equal(result.code, 'incomplete'); assert.match(result.label, /stopped on an error before an answer was drafted/);
   run.status = 'complete'; assert.equal(assessResult(run).code, 'unsettled');
+});
+
+test('an objection is withdrawn when the member who raised it votes to approve the candidate', () => {
+  const run = { status: 'complete', stopReason: 'budget', candidateVersion: 1, participants: [{ id: 'a' }, { id: 'b' }, { id: 'c' }], drafterId: 'a',
+    issues: [
+      { id: 'o1', raisedBy: 'b', against: 'a', claim: 'x', condition: 'y', status: 'open', seq: 3 },
+      { id: 'o2', raisedBy: 'c', against: 'a', claim: 'z', condition: 'w', status: 'open', seq: 4 },
+    ],
+    entries: [
+      { id: 'e1', seq: 1, speaker: 'a', phase: 'opening', status: 'complete' }, { id: 'e2', seq: 1, speaker: 'b', phase: 'opening', status: 'complete' },
+      { id: 'e3', seq: 2, speaker: 'c', phase: 'opening', status: 'complete' },
+      { id: 'e5', seq: 5, speaker: 'a', phase: 'draft', status: 'complete', candidateVersion: 1, text: 'answer', fields: { unresolved: [] } },
+      { id: 'e6', seq: 6, speaker: 'b', phase: 'ratify', status: 'complete', candidateVersion: 1, fields: { vote: 'approve', objections: [] } },
+      { id: 'e7', seq: 7, speaker: 'c', phase: 'ratify', status: 'complete', candidateVersion: 1, fields: { vote: 'approve', objections: [] } },
+    ] };
+  // Both authors approved: nothing is left open, and the meeting is approved rather than "ran out of turns".
+  assert.deepEqual(openIssuesOf(run), []); assert.equal(issueStatus(run, run.issues[0]), 'withdrawn');
+  assert.equal(assessResult(run).code, 'approved');
+  // An author who objects at the ballot keeps the objection open.
+  run.entries.find(e => e.phase === 'ratify' && e.speaker === 'c').fields.vote = 'object';
+  assert.deepEqual(openIssuesOf(run).map(i => i.id), ['o2']); assert.equal(assessResult(run).code, 'objections');
 });

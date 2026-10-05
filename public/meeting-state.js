@@ -5,6 +5,17 @@ export function estimateCalls(count, cycles, revisions = 1, openings = true) {
   const initial = openings ? count : 0, floor = count * cycles;
   return { typical: initial + floor + count, maximum: initial + floor * 2 + count * (1 + revisions) };
 }
+// An objection's standing after the ballot. A member who votes to approve the current candidate has accepted it, so an objection
+// that member raised on the floor no longer stands: leaving it open would report doubt its own author has withdrawn. Judged from
+// the log, so an older meeting is read the same way.
+export function issueStatus(run, issue) {
+  if (issue.status !== 'open') return issue.status;
+  const approved = (run.entries || []).some(e => e.phase === 'ratify' && e.status === 'complete' && !e.superseded && e.candidateVersion === run.candidateVersion
+    && e.speaker === issue.raisedBy && e.fields?.vote === 'approve' && (e.seq ?? Infinity) > (issue.seq ?? -Infinity));
+  return approved ? 'withdrawn' : 'open';
+}
+export const openIssuesOf = run => (run.issues || []).filter(i => issueStatus(run, i) === 'open');
+
 export function callsUsed(run, allSessions = false) {
   return (run.entries || []).filter(e => e.speaker !== 'owner' && ['opening', 'floor', 'draft', 'ratify', 'propose', 'review', 'synthesize'].includes(e.phase) && (allSessions || (e.session || 1) === (run.session || 1))).length;
 }
@@ -45,7 +56,7 @@ export function assessResult(run) {
   const votes = { approve: 0, object: 0, abstain: 0 };
   for (const ballot of ballots) votes[['approve', 'object', 'abstain'].includes(ballot.fields?.vote) ? ballot.fields.vote : 'abstain']++;
   const missingBallots = voters.length - ballots.length;
-  const checks = candidate?.checks || [], openIssues = (run.issues || []).filter(i => i.status === 'open');
+  const checks = candidate?.checks || [], openIssues = openIssuesOf(run);
   const writeWorkspace = run.workspace && run.workspace.level !== 'read-only';
   // A member voting against the candidate is dissent. A floor objection nobody answered before the budget ran out is not the
   // same thing, and a caller that can buy more turns should be able to tell them apart without reading the prose.
