@@ -4,7 +4,7 @@
 import { readFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { buildPlaybook, PLAYBOOKS } from '../public/playbooks.js';
-import { assessResult } from '../public/meeting-state.js';
+import { assessResult, callsUsed } from '../public/meeting-state.js';
 
 const DEFAULT_URL = process.env.OVERRULE_URL || 'http://127.0.0.1:4310';
 const USAGE = `overrule — convene a council of models from the command line.
@@ -188,6 +188,9 @@ export function machineReadable(run, url) {
     workspace: run.workspace ? { path: run.workspace.path, level: run.workspace.level, origin: run.workspace.origin || null, head: run.workspace.head || null } : null,
     research: Boolean(run.research), deepResearch: Boolean(run.deepResearch),
     metrics: record.metrics || null, error: run.error || null,
+    // Model calls and the tokens providers reported, across every session, counted as the interface counts them.
+    calls: callsUsed(run, true),
+    usage: (run.entries || []).reduce((sum, e) => ({ input: sum.input + (e.usage?.input || 0), output: sum.output + (e.usage?.output || 0) }), { input: 0, output: 0 }),
   };
 }
 
