@@ -894,3 +894,19 @@ test('a closed meeting can be reconvened: same record, fresh budget, the branch 
   assert.equal(run.status, 'complete', run.error); assert.equal(run.workspace.branch, `overrule/${run.id.slice(0, 8)}`); assert.deepEqual(latestCandidateOf(run).files.map(f => f.path || f), ['step-5.txt']);
 });
 const latestCandidateOf = run => [...run.entries].reverse().find(e => e.phase === 'draft' && e.status === 'complete' && e.candidate).candidate;
+
+test('members are told who is out of the meeting and why, so nobody addresses a member that cannot answer', () => {
+  const base = { prompt: 'Q', participants: [{ id: 'a', name: 'Opus' }, { id: 'b', name: 'Sol' }, { id: 'c', name: 'Llama' }], drafterId: 'a', issues: [], floorStarted: true, dropped: ['b'],
+    entries: [
+      { id: 'e1', seq: 1, speaker: 'a', phase: 'opening', status: 'complete', text: 'x', fields: {} },
+      { id: 'e2', seq: 2, speaker: 'b', phase: 'opening', status: 'complete', text: 'y', fields: {} },
+      { id: 'e3', seq: 3, speaker: 'b', phase: 'floor', status: 'failed', error: 'codex exited with code 1: Selected model is at capacity.' },
+      { id: 'e4', seq: 4, speaker: 'b', phase: 'floor', status: 'failed', error: 'codex exited with code 1: Selected model is at capacity.' },
+    ] };
+  const roster = thread(base).split('\n\n').find(s => s.startsWith('MEMBERS'));
+  assert.match(roster, /- Sol — OUT OF THE MEETING: its last two turns failed \(codex exited with code 1: Selected model is at capacity\.\)/);
+  assert.match(roster, /- Llama — NOT TAKING PART: its opening failed/);
+  assert.match(roster, /- Opus\n/);
+  base.dropped = [];
+  assert.match(thread(base), /- Sol — its last turn failed and was skipped \(codex exited/);
+});
