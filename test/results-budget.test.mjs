@@ -202,3 +202,10 @@ test('a neutral drafter needs two other members to argue', () => {
   assert.equal(validateRun({ prompt: 'Q', participantIds: ['a', 'b', 'c'], drafterId: 'a', neutralDrafter: true }, providers).neutralDrafter, true);
   assert.equal(validateRun({ prompt: 'Q', participantIds: ['a', 'b'], drafterId: 'a' }, providers).neutralDrafter, false);
 });
+
+test('a ballot can state the option its member would choose, apart from the vote', () => {
+  const run = { candidateVersion: 1, issues: [], entries: [], participants: [] };
+  const ballot = normalizeFields(run, 'ratify', { vote: 'object', objections: [{ claim: 'overstates certainty', condition: 'hedge it' }], reason: 'wording', choice: 'correct_resubmit' });
+  assert.equal(ballot.vote, 'object'); assert.equal(ballot.choice, 'correct_resubmit');
+  assert.equal(normalizeFields(run, 'ratify', { vote: 'approve', reason: 'fine' }).choice, '');
+});

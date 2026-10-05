@@ -76,7 +76,7 @@ test('a meeting decided by an older version is judged again, so the report and t
     entries: [
       { id: 'e1', speaker: 'a', phase: 'opening', status: 'complete', usage: { input: 120, output: 30 } }, { id: 'e2', speaker: 'b', phase: 'opening', status: 'complete' },
       { id: 'e3', speaker: 'a', phase: 'draft', status: 'complete', candidateVersion: 1, text: 'The sentence stands.', fields: { unresolved: [] } },
-      { id: 'e4', speaker: 'b', phase: 'ratify', status: 'complete', candidateVersion: 1, fields: { vote: 'approve', reason: 'fine', objections: [] } },
+      { id: 'e4', speaker: 'b', phase: 'ratify', status: 'complete', candidateVersion: 1, fields: { vote: 'approve', reason: 'fine', objections: [], choice: 'stands' } },
     ],
     record: { verdict: { code: 'objections', label: 'Objections remain', verification: 'none' } },
     final: 'The sentence stands.',
@@ -85,7 +85,7 @@ test('a meeting decided by an older version is judged again, so the report and t
   assert.equal(shown.verdict.code, 'unsettled'); assert.equal(shown.verdict.dissent, false); assert.equal(shown.verdict.stopReason, 'budget');
   assert.equal(shown.objections[0].raisedBy, 'Codex'); assert.equal(shown.objections[0].against, 'Claude Code');
   assert.equal(shown.objections[0].resolvingCondition, 'name the check'); assert.equal(shown.openObjections, 1);
-  assert.equal(shown.ballots[0].member, 'Claude Code'); assert.equal(shown.ballots[0].vote, 'approve');
+  assert.equal(shown.ballots[0].member, 'Claude Code'); assert.equal(shown.ballots[0].vote, 'approve'); assert.equal(shown.ballots[0].choice, 'stands');
   assert.equal(shown.candidate, 'The sentence stands.'); assert.deepEqual(shown.members, ['Codex', 'Claude Code']); assert.equal(shown.drafter, 'Codex');
   // A caller budgeting a comparison needs what the meeting spent: four model calls, and the tokens the one reporting provider gave.
   assert.equal(shown.calls, 4); assert.deepEqual(shown.usage, { input: 120, output: 30 });

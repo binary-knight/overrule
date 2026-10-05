@@ -57,7 +57,7 @@ Read the whole report, not just the verdict. The value is in the objections, whi
 - **Unsettled.** The council reached no conclusion and nobody dissented: the floor ran out of turns or stopped moving. `overrule resume <id> --cycles 3` carries on with the same council and record instead of paying for the openings again, and `--note "<what to settle>"` goes in as the owner's own message.
 - **Error.** Report what the message said. Do not retry in a loop.
 
-With `--json` you get the record, not only the prose: `verdict` (with `dissent`, `stopReason`, and the vote counts), `ballots[]`, `objections[]` with each one's `resolvingCondition`, the `candidate` text, `members`, `metrics`, `calls` and `usage` (what the meeting spent), `failedTurns` (any member turn that failed, and why), and the meeting `url`. Quote from those fields rather than scraping the Markdown.
+With `--json` you get the record, not only the prose: `verdict` (with `dissent`, `stopReason`, and the vote counts), `ballots[]` (each with its `choice` when the task asks for one option among several), `objections[]` with each one's `resolvingCondition`, the `candidate` text, `members`, `metrics`, `calls` and `usage` (what the meeting spent), `failedTurns` (any member turn that failed, and why), and the meeting `url`. Quote from those fields rather than scraping the Markdown.
 
 Never present the council's findings as your own verification. Say where they came from. If a finding contradicts what you know about the code, check it yourself before passing it on: the members read the tree, but they can be wrong, and two of them agreeing does not make a thing true.
 
