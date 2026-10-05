@@ -51,6 +51,8 @@ export function assessResult(run) {
   let code = 'incomplete', label = 'Verification incomplete';
   if (checks.some(c => Number.isInteger(c.code) && c.code !== 0)) { code = 'checks-failed'; label = 'Checks failed'; }
   else if (dissent) { code = 'objections'; label = 'Objections remain'; }
+  // A meeting that failed before anyone drafted an answer did not run out of turns, whatever the floor's stop reason says.
+  else if (run.status === 'failed' && !draft) { code = 'incomplete'; label = 'Incomplete: the meeting stopped on an error before an answer was drafted'; }
   else if (unsettled) { code = 'unsettled'; label = run.stopReason === 'stalled' ? 'Unsettled: the floor stopped moving' : 'Unsettled: the meeting ran out of turns'; }
   else if (openIssues.length || draft?.fields?.unresolved?.length) { code = 'objections'; label = 'Objections remain'; }
   else if (draft && (!writeWorkspace || candidateReady(run, candidate)) && voters.length > 0 && !missingBallots && votes.approve === voters.length && run.status === 'complete') { code = 'approved'; label = 'Approved'; }

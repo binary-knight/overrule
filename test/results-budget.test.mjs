@@ -160,3 +160,12 @@ test('API limit validation refuses invalid numbers and does not depend on browse
   for (const value of [0, -1, 0.5, 86401, 'bad']) assert.throws(() => validateRun({ ...input, maxDurationSeconds: value }, members), /time limit/);
   assert.equal(callsUsed({ entries: ['propose', 'review', 'synthesize'].map(phase => ({ phase, name: 'Legacy model' })) }), 3);
 });
+
+test('a meeting that fails before a draft is incomplete, not unsettled, even when the floor closed on budget', () => {
+  const run = { status: 'failed', stopReason: 'budget', candidateVersion: 1, participants: [{ id: 'a' }, { id: 'b' }], drafterId: 'a',
+    issues: [{ id: 'o1', raisedBy: 'a', against: 'b', claim: 'x', condition: 'y', status: 'open' }],
+    entries: [{ id: 'e1', speaker: 'a', phase: 'opening', status: 'complete' }, { id: 'e2', speaker: 'a', phase: 'draft', status: 'failed', candidateVersion: 1 }] };
+  const result = assessResult(run);
+  assert.equal(result.code, 'incomplete'); assert.match(result.label, /stopped on an error before an answer was drafted/);
+  run.status = 'complete'; assert.equal(assessResult(run).code, 'unsettled');
+});
