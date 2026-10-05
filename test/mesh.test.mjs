@@ -910,3 +910,9 @@ test('members are told who is out of the meeting and why, so nobody addresses a 
   base.dropped = [];
   assert.match(thread(base), /- Sol — its last turn failed and was skipped \(codex exited/);
 });
+
+test('the neutral drafter is named in the roster and needs three members', async () => {
+  const run = { prompt: 'Q', participants: [{ id: 'a', name: 'Opus' }, { id: 'b', name: 'Sol' }, { id: 'c', name: 'Llama' }], drafterId: 'a', neutralDrafter: true, issues: [], entries: [], floorStarted: true, dropped: [] };
+  assert.match(thread(run), /- Opus — DRAFTER ONLY: does not argue or vote/);
+  assert.doesNotMatch(thread(run), /Opus — NOT TAKING PART/);
+});

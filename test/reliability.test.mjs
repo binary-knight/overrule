@@ -501,3 +501,15 @@ test('inspect names the documents no member can read without a shell', async t =
   const info = await inspect(root);
   assert.deepEqual(info.documents.map(d => d.name).sort(), names);
 });
+
+test('a neutral drafter gives no opening, takes no floor turn and casts no ballot, and is told to write what the floor supports', () => {
+  const run = { prompt: 'Q', participants: [{ id: 'a', name: 'Opus' }, { id: 'b', name: 'Sol' }, { id: 'c', name: 'Llama' }], drafterId: 'a', neutralDrafter: true,
+    issues: [], entries: [], floorStarted: false, dropped: [], cycles: 1, candidateVersion: 1, revisions: 0, maxRevisions: 1 };
+  const opening = plan(run, activeMembers(run));
+  assert.deepEqual(opening.members.map(m => m.id), ['b', 'c']);
+  run.entries.push({ id: 'e1', seq: 1, speaker: 'b', phase: 'opening', status: 'complete', text: 'x', fields: {} }, { id: 'e2', seq: 2, speaker: 'c', phase: 'opening', status: 'complete', text: 'y', fields: {} });
+  run.floorStarted = true;
+  assert.deepEqual(activeMembers(run).map(m => m.id), ['b', 'c']);
+  const turn = plan(run, activeMembers(run));
+  assert.equal(turn.type, 'turn'); assert.notEqual(turn.speaker.id, 'a');
+});

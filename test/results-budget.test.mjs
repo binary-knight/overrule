@@ -195,3 +195,10 @@ test('an objection is withdrawn when the member who raised it votes to approve t
   run.entries.find(e => e.phase === 'ratify' && e.speaker === 'c').fields.vote = 'object';
   assert.deepEqual(openIssuesOf(run).map(i => i.id), ['o2']); assert.equal(assessResult(run).code, 'objections');
 });
+
+test('a neutral drafter needs two other members to argue', () => {
+  const providers = [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' }];
+  assert.throws(() => validateRun({ prompt: 'Q', participantIds: ['a', 'b'], drafterId: 'a', neutralDrafter: true }, providers), /at least three members/);
+  assert.equal(validateRun({ prompt: 'Q', participantIds: ['a', 'b', 'c'], drafterId: 'a', neutralDrafter: true }, providers).neutralDrafter, true);
+  assert.equal(validateRun({ prompt: 'Q', participantIds: ['a', 'b'], drafterId: 'a' }, providers).neutralDrafter, false);
+});

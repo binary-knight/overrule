@@ -24,6 +24,7 @@ Options
   --level <name>         talk, read-only (default with a workspace), workspace-write, full-access.
   --members <names>      Comma-separated connection names. Default: every ready connection, up to eight.
   --drafter <name>       Which member writes the candidate. Default: the first member.
+  --neutral-drafter      The drafter writes the answer but does not argue or vote. Needs three or more members.
   --cycles <n>           Turns per member, 1 to 8. Default 2.
   --revisions <n>        Revisions allowed after objections, 0 to 5. Default 1.
   --research             Members that can browse may search the web.
@@ -54,7 +55,7 @@ Exit status says whether the council settled the question.
 Treat any non-zero status you do not recognise as retryable rather than as failure.`;
 
 const VERDICT_EXIT = { approved: 0, objections: 2, 'checks-failed': 3, incomplete: 4, unsettled: 5 };
-const FLAGS = new Set(['research', 'deep-research', 'network', 'json', 'quiet', 'no-wait', 'acknowledge', 'acknowledge-full-access', 'help', 'version']);
+const FLAGS = new Set(['neutral-drafter', 'research', 'deep-research', 'network', 'json', 'quiet', 'no-wait', 'acknowledge', 'acknowledge-full-access', 'help', 'version']);
 const MANY = new Set(['attach', 'check', 'exclude']);
 
 export function parseArgs(argv) {
@@ -276,7 +277,7 @@ export async function main(argv, { out = console.log, err = console.error } = {}
   if (!options.quiet) err(seating + (billed.length && !options.members ? `\n${billed.length} of these bill your API accounts per token. Pass --members to choose the council yourself.` : ''));
   const { seats, names, ...meeting } = members;
   const run = await client.call('/api/runs', 'POST', {
-    prompt, ...meeting, cycles: options.cycles ? number(options.cycles, 'cycles') : 2,
+    prompt, ...meeting, ...(options['neutral-drafter'] ? { neutralDrafter: true } : {}), cycles: options.cycles ? number(options.cycles, 'cycles') : 2,
     revisions: options.revisions === undefined ? 1 : number(options.revisions, 'revisions'),
     research: Boolean(options.research) || Boolean(options['deep-research']), deepResearch: Boolean(options['deep-research']),
     ...(options['turn-limit'] ? { timeoutSeconds: number(options['turn-limit'], 'turn-limit') } : {}),
