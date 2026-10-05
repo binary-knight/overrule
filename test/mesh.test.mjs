@@ -181,6 +181,9 @@ test('provider errors do not leak upstream error bodies or treat truncated answe
 test('CLI adapters parse structured events and keep prompts out of command arguments', () => {
   assert.equal(parseCli('codex-cli', '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}\n{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":2}}').text, 'answer');
   assert.equal(parseCli('claude-cli', '{"subtype":"success","result":"answer"}').text, 'answer');
+  // Claude reports cached input apart from input_tokens; a member's reading is all three. Codex's input already includes its cache.
+  assert.deepEqual(parseCli('claude-cli', '{"subtype":"success","result":"a","usage":{"input_tokens":4,"cache_creation_input_tokens":900,"cache_read_input_tokens":11000,"output_tokens":50}}').usage, { input: 11904, output: 50 });
+  assert.deepEqual(parseCli('codex-cli', '{"type":"item.completed","item":{"type":"agent_message","text":"a"}}\n{"type":"turn.completed","usage":{"input_tokens":9000,"cached_input_tokens":8000,"output_tokens":40}}').usage, { input: 9000, output: 40 });
   assert.throws(() => parseCli('claude-cli', '{"is_error":true,"result":"raw diagnostic"}'), /could not complete/);
   assert.throws(() => parseCli('codex-cli', '{"type":"turn.failed"}'), /could not complete/);
   const [, args] = cliCommand('codex-cli', 'my-model'); assert.ok(args.includes('read-only')); assert.ok(args.includes('features.shell_tool=false'));
