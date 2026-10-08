@@ -37,6 +37,14 @@ The pairing code is new on every server start and can be rotated from the LAN ac
 
 LAN traffic uses HTTP. Use it on your trusted network; an untrusted network requires HTTPS or a trusted encrypted tunnel. No public Internet deployment or port forwarding is configured.
 
+### The pairing code over SSH
+
+`npm run pair` (or `node scripts/pairing-code.mjs`) prints the running server's pairing code and its addresses, grouped into Tailscale, this network, and virtual bridges other devices cannot reach, with a ready command line for `bin/overrule.mjs`. It asks the server over localhost, the one route the code is answered on, so it works from an SSH session without the host's screen. `--rotate` issues a new code and signs out every paired device; `--json` prints one object. When the server is not running it shows the last saved code with a warning, because starting the server makes a new one: start it first, then read the code. It honours `PORT` and `OVERRULE_DATA_DIR`.
+
+### Access over Tailscale
+
+If the host runs Tailscale, its tailnet address (100.64.0.0/10) is one of the interfaces the server detects, so it already appears in the LAN access dialog, the server log and `npm run pair`, and the same pairing applies: open `http://<tailnet address>:4310` from any device signed into your tailnet and enter the code. Tailscale encrypts the traffic between devices, so the plain-HTTP caution above does not apply on that path. The host firewall still has to admit TCP 4310 on the `tailscale0` interface (`sudo ufw allow in on tailscale0 to any port 4310` under ufw); the app does not change the firewall. The MagicDNS name is not accepted as a Host header; use the address.
+
 ## Connect your models
 
 The default council contains Codex and Claude Code. Install current versions of their official CLIs if needed, then sign in **in your own terminal**:
