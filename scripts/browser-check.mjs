@@ -82,6 +82,20 @@ try {
   await page.waitForFunction(() => document.querySelector('#run-title').textContent === 'Approved');
   await page.click('#new-discussion'); await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: join(root, 'artifacts', 'mobile.png'), fullPage: true });
+  // The agentsec install help holds shell commands that cannot wrap, and it only shows on machines without agentsec-pack; show it
+  // regardless, so the narrowest layouts are always checked with their widest content, on phone and tablet widths and every page.
+  await page.evaluate(() => { for (const id of ['agentsec-help', 'security-off']) document.getElementById(id).classList.remove('hidden'); });
+  const overflowing = async () => page.evaluate(() => document.documentElement.scrollWidth > innerWidth ? `${document.documentElement.scrollWidth}px in ${innerWidth}px` : '');
+  for (const width of [390, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const nav of ['workspace', 'security', 'archive', 'connections']) {
+      await page.evaluate(id => document.getElementById(`${id}-nav`).click(), nav);
+      assert.equal(await overflowing(), '', `${nav} page overflows at ${width}px`);
+    }
+    await page.evaluate(() => document.getElementById('new-discussion').click());
+    assert.equal(await overflowing(), '', `the new meeting form overflows at ${width}px`);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Mobile has horizontal overflow');
   await page.click('#demo'); await page.waitForSelector('#cancel:not(.hidden)'); await page.click('#cancel');
   await page.waitForFunction(() => document.querySelector('#run-title').textContent === 'Meeting cancelled.');
@@ -155,8 +169,59 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: join(root, 'artifacts', 'evidence-mobile.png'), fullPage: true });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Evidence panel has mobile overflow');
+  // Deleting asks first; keeping changes nothing, confirming removes the shown meeting and returns to the composer.
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  const objectedId = (await objectedResponse.json()).id;
+  // Renaming changes how the meeting is listed and survives a reload; the brief stays as the council read it.
+  await page.click('#rename-run'); await page.waitForFunction(() => document.querySelector('#rename-dialog').open);
+  await page.fill('#rename-input', 'Objection fixture'); await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('#run-name-text').textContent === 'Objection fixture');
+  await page.reload(); await page.waitForSelector(`[data-run="${objectedId}"]`);
+  assert.equal(await page.locator(`[data-run="${objectedId}"] .history-title`).textContent(), 'Objection fixture');
+  await page.locator(`[data-run="${objectedId}"]`).click(); await page.waitForFunction(() => document.querySelector('#run-title').textContent === 'Objections remain');
+  assert.equal(await page.locator('#run-prompt').textContent(), 'BROWSER-OBJECT');
+  // Search narrows the list as you type and marks what matched; Escape clears it.
+  await page.fill('#history-search', 'browser-object');
+  await page.waitForFunction(id => document.querySelectorAll('#history [data-run]').length === 1 && document.querySelector(`#history [data-run="${id}"]`), objectedId);
+  assert.match(await page.locator('#history-summary').textContent(), /^1 of \d+ meetings match/);
+  await page.locator('#history-search').press('Escape');
+  await page.waitForFunction(() => document.querySelector('#history-summary').classList.contains('hidden') && document.querySelectorAll('#history [data-run]').length > 1);
+  // Archiving hides it from the list and keeps it under Archive, where it can be opened and unarchived.
+  await page.click('#archive-run'); await page.waitForFunction(id => !document.querySelector(`#history [data-run="${id}"]`) && !document.querySelector('#run-archived').classList.contains('hidden'), objectedId);
+  await page.click('#archive-nav'); await page.waitForSelector(`[data-open-run="${objectedId}"]`);
+  assert.equal(await page.locator('#archive-count').textContent(), '1');
+  await page.click(`[data-unarchive-run="${objectedId}"]`); await page.waitForFunction(id => document.querySelector(`#history [data-run="${id}"]`), objectedId);
+  await page.click(`[data-run="${objectedId}"]`); await page.waitForFunction(() => document.querySelector('#run-title').textContent === 'Objections remain' && document.querySelector('#run-archived').classList.contains('hidden'));
+  // Settings: as many meetings as the disk safely holds, saved on the host, then back to the default. The dialog shows the room.
+  await page.click('#settings-button'); await page.waitForFunction(() => document.querySelector('#settings-dialog').open);
+  assert.match(await page.locator('#settings-storage').textContent(), /Meetings take .* on the host/);
+  await page.check('input[name=history-keep][value=max]'); await page.click('#settings-save');
+  await page.waitForFunction(() => !document.querySelector('#settings-dialog').open);
+  assert.equal((await (await page.request.get(base + '/api/settings')).json()).historyLimit, 'max');
+  await page.click('#settings-button'); await page.waitForFunction(() => document.querySelector('#settings-dialog').open);
+  await page.fill('#history-limit', '30'); await page.click('#settings-save'); await page.waitForFunction(() => !document.querySelector('#settings-dialog').open);
+  assert.equal((await (await page.request.get(base + '/api/settings')).json()).historyLimit, 30);
+  // Pinning puts the meeting under Pinned with its project, survives a reload, and blocks deletion until it is unpinned.
+  await page.click('#pin-run'); await page.waitForFunction(() => document.querySelector('#pin-dialog').open);
+  await page.fill('#pin-project', 'Browser check'); await page.fill('#pin-tags', 'smoke, objection'); await page.click('#pin-save');
+  await page.waitForFunction(() => /Project: Browser check/.test(document.querySelector('#run-pin').textContent));
+  await page.reload(); await page.waitForSelector('.history-group-name');
+  assert.equal(await page.locator('.history-group-name').textContent(), 'Browser check');
+  assert.deepEqual(await page.locator(`.history-group [data-run="${objectedId}"] .tag`).allTextContents(), ['smoke', 'objection']);
+  await page.locator(`[data-run="${objectedId}"]`).click(); await page.waitForFunction(() => document.querySelector('#run-title').textContent === 'Objections remain');
+  await page.click('#delete-run'); await page.waitForFunction(() => /pinned\. Unpin it first/.test(document.querySelector('#toast').textContent));
+  await page.click('#pin-run'); await page.waitForFunction(() => document.querySelector('#pin-dialog').open); await page.click('#pin-unpin');
+  await page.waitForFunction(() => document.querySelector('#confirm-dialog').open); await page.click('#confirm-ok');
+  await page.waitForFunction(() => document.querySelector('#run-pin').classList.contains('hidden') && !document.querySelector('.history-group'));
+  await page.click('#delete-run'); await page.waitForFunction(() => document.querySelector('#delete-dialog').open);
+  assert.match(await page.locator('#delete-items').textContent(), /The meeting record/);
+  await page.click('#delete-cancel'); assert.equal((await page.request.get(`${base}/api/runs/${objectedId}`)).status(), 200);
+  await page.click('#delete-run'); await page.waitForFunction(() => document.querySelector('#delete-dialog').open); await page.click('#delete-confirm');
+  await page.waitForFunction(() => document.querySelector('#discussion').classList.contains('hidden'));
+  assert.equal(await page.locator(`[data-run="${objectedId}"]`).count(), 0);
+  assert.equal((await page.request.get(`${base}/api/runs/${objectedId}`)).status(), 404);
   assert.deepEqual(errors, []);
-  console.log('Browser checks passed: desktop, mobile, connections, escaped content, demo, history, export, citation links, verdicts, limit settings and resume, cancellation, LAN pairing, and workspace verification retry. No live model calls.');
+  console.log('Browser checks passed: desktop, mobile, connections, escaped content, demo, history, export, citation links, verdicts, limit settings and resume, cancellation, search, archive, settings, renaming, pinning, deletion, LAN pairing, and workspace verification retry. No live model calls.');
 } finally {
   for (const run of mesh.runs) mesh.cancel(run.id);
   for (let i = 0; i < 1000 && mesh.controllers.size; i++) await delay(10);

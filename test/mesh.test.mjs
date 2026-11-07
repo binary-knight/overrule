@@ -389,7 +389,18 @@ test('workspace paths are validated against system folders, symlinks, hidden seg
   await symlink(project, join(root, 'link'));
   const rules = { appRoot: '/srv/overrule', dataDir: join(root, 'appdata') }; await mkdir(join(root, 'appdata'));
   assert.equal(validateWorkspacePath(project, rules), project);
-  assert.throws(() => validateWorkspacePath('/etc', rules), /System directories/); assert.throws(() => validateWorkspacePath('~', rules), /home directory itself/);
+  assert.throws(() => validateWorkspacePath('/etc', rules), /System directories/);
+  // The home directory itself is refused, but which rule refuses it depends on the machine. A home inside a system folder, such as
+  // /root for the root user or /var/lib/<name> for a service account, is refused as a system directory first, and rightly: nothing
+  // inside it can be a workspace either. So this machine's home is only checked for refusal, and the home rule itself is checked
+  // against a home directory the test controls.
+  assert.throws(() => validateWorkspacePath('~', rules), /home directory itself|System directories/);
+  const home = await mkdtemp(join(tmpdir(), 'mesh-home-')); t.after(() => rm(home, { recursive: true, force: true }));
+  const realHome = process.env.HOME; process.env.HOME = home; // os.homedir() reads HOME on every call
+  try {
+    assert.throws(() => validateWorkspacePath('~', rules), /home directory itself/);
+    assert.throws(() => validateWorkspacePath(home, rules), /home directory itself/);
+  } finally { if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome; }
   assert.throws(() => validateWorkspacePath(root, rules), /own directory/); // a folder that contains the app's data cannot be a workspace
   assert.throws(() => validateWorkspacePath(join(root, 'link'), rules), /Symlinked/);
   const elsewhere = await mkdtemp(join(tmpdir(), 'mesh-other-')); t.after(() => rm(elsewhere, { recursive: true, force: true }));
@@ -765,7 +776,7 @@ test('documents are staged, claimed by a meeting, read by every member; files le
   failDraft = false; prompts.length = 0;
   assert.equal((await fetch(`${base}/api/runs/${run.id}/resume`, { method: 'POST', headers, body: '{}' })).status, 200); await finished(mesh, run);
   assert.equal(run.status, 'complete'); assert.ok(prompts.every(call => /Penalty is 2 percent per week/.test(call.prompt)));
-  // Completion keeps the text too, so the meeting can be reconvened; the owner's remove button or history eviction deletes it.
+  // Completion keeps the text too, so the meeting can be reconvened; the owner's remove button, Delete, or ageing out of the history deletes it.
   assert.equal(run.documents.state, 'text-kept'); assert.ok(existsSync(join(folder, 'text.txt'))); assert.ok(!existsSync(join(folder, 'file')));
   assert.equal((await fetch(`${base}/api/runs/${run.id}/documents`, { method: 'DELETE', headers })).status, 200);
   assert.equal(run.documents.state, 'removed'); assert.ok(!existsSync(join(store.directory, 'attachments', run.id)));

@@ -15,7 +15,19 @@ const USAGE = `overrule — convene a council of models from the command line.
   overrule reconvene <id> "<what next>"   Reopen a closed meeting with a new instruction.
   overrule watch <id>                     Follow a meeting that is already running.
   overrule show <id> [--json]             Print a finished meeting's report.
-  overrule list [--json]                  List recent meetings.
+  overrule list [--search <words>] [--tag <tag>]... [--project <name>] [--archived] [--json]
+                                          List meetings: pinned first, then recent ones. --search matches
+                                          names, briefs, tags, answers, and transcripts; --archived lists the Archive.
+  overrule rename <id> "<name>"           Change how a meeting is listed; "" lists it by its brief again.
+  overrule pin <id> [--project <name>] [--tag <tag>]...
+                                          Pin a meeting to the top of the history so it is never pruned,
+                                          or change a pinned meeting's project and tags.
+  overrule unpin <id>                     Return a pinned meeting to the recent list; clears its project and tags.
+  overrule archive <id>                   Move a stopped meeting to the Archive: kept in full, off the list, never pruned.
+  overrule unarchive <id>                 Return an archived meeting to the list.
+  overrule settings [--keep <n>|max]      Show or change how many meetings the history keeps; "max" keeps as many as
+                                          the disk safely holds, which is also the most a number may be.
+  overrule delete <id> [--yes]            Permanently delete a stopped meeting and everything kept for it.
   overrule playbooks                      List the report templates.
 
 Options
@@ -42,6 +54,12 @@ Options
   --acknowledge-full-access   Required for --level full-access.
   --note <text>          A message to the council, delivered with resume.
   --no-wait              Print the meeting id and exit instead of waiting.
+  --project <name>       With pin: the project to group the meeting under. --project "" removes it.
+  --tag <tag>            With pin: a tag for the meeting. Repeatable; replaces the meeting's tags.
+  --search <words>       With list: only meetings where every word or "quoted phrase" appears.
+  --archived             With list: list archived meetings instead.
+  --keep <n>|max         With settings: keep the n most recent meetings, or as many as the disk safely holds.
+  --yes                  Confirm "delete" without asking. Required when there is no terminal to ask on.
   --json                 Print one JSON object instead of a report.
   --quiet                Print the report only, with no progress.
   --url <address>        Server to use. Default ${DEFAULT_URL}.
@@ -55,11 +73,11 @@ Exit status says whether the council settled the question.
 Treat any non-zero status you do not recognise as retryable rather than as failure.`;
 
 const VERDICT_EXIT = { approved: 0, objections: 2, 'checks-failed': 3, incomplete: 4, unsettled: 5 };
-const FLAGS = new Set(['neutral-drafter', 'research', 'deep-research', 'network', 'json', 'quiet', 'no-wait', 'acknowledge', 'acknowledge-full-access', 'help', 'version']);
-const MANY = new Set(['attach', 'check', 'exclude']);
+const FLAGS = new Set(['neutral-drafter', 'research', 'deep-research', 'network', 'json', 'quiet', 'no-wait', 'acknowledge', 'acknowledge-full-access', 'yes', 'archived', 'help', 'version']);
+const MANY = new Set(['attach', 'check', 'exclude', 'tag']);
 
 export function parseArgs(argv) {
-  const options = { _: [], attach: [], check: [], exclude: [] };
+  const options = { _: [], attach: [], check: [], exclude: [], tag: [] };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg.startsWith('--')) { options._.push(arg); continue; }
@@ -177,9 +195,9 @@ export function machineReadable(run, url) {
   const draft = [...(run.entries || [])].reverse().find(e => e.phase === 'draft' && e.status === 'complete' && !e.superseded && e.candidateVersion === run.candidateVersion);
   const name = id => (run.participants || []).find(p => p.id === id)?.name || id;
   return {
-    id: run.id, status: run.status, url: `${url}/#${run.id}`,
+    id: run.id, title: run.title || null, status: run.status, url: `${url}/#${run.id}`,
     verdict: live ? { code: live.code, label: live.label, verification: live.verification, dissent: live.dissent, stopReason: live.stopReason, votes: live.votes, voters: live.voters, missingBallots: live.missingBallots } : record.verdict || null,
-    stopReason: run.stopReason || null, cycles: run.cycles, session: run.session || 1,
+    stopReason: run.stopReason || null, cycles: run.cycles, session: run.session || 1, pin: run.pin || null,
     final: run.final || '', candidate: draft?.text || '', candidateVersion: run.candidateVersion,
     ballots: (run.entries || []).filter(e => e.phase === 'ratify' && e.status === 'complete' && !e.superseded && e.candidateVersion === run.candidateVersion)
       .map(e => ({ member: e.name || name(e.speaker), vote: e.fields?.vote || 'abstain', choice: e.fields?.choice || '', reason: e.fields?.reason || '', objections: (e.fields?.objections || []).map(o => ({ claim: o.claim, resolvingCondition: o.condition })) })),
@@ -207,7 +225,23 @@ function report(run, assessed) {
   ].filter(line => line !== '').join('\n');
 }
 
-export async function main(argv, { out = console.log, err = console.error } = {}) {
+// Changing a meeting by id: a prefix must name exactly one meeting, so a short id never acts on the wrong one.
+async function onlyMeeting(client, id) {
+  const matches = (await client.call('/api/runs')).filter(run => run.id === id || run.id.startsWith(id));
+  if (!matches.length) fail(`No meeting starts with ${id}.`);
+  if (matches.length > 1) fail(`${id} matches ${matches.length} meetings. Give more of the id.`);
+  return matches[0];
+}
+
+// Asks on the terminal. With no terminal there is nobody to ask: null, which the caller treats as a refusal with advice.
+async function askTerminal(question) {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) return null;
+  const { createInterface } = await import('node:readline/promises');
+  const prompt = createInterface({ input: process.stdin, output: process.stderr });
+  try { return /^y(es)?$/i.test((await prompt.question(question)).trim()); } finally { prompt.close(); }
+}
+
+export async function main(argv, { out = console.log, err = console.error, confirm = askTerminal } = {}) {
   const options = parseArgs(argv);
   if (options.help || !options._.length) { out(USAGE); return 0; }
   const command = options._[0];
@@ -218,9 +252,108 @@ export async function main(argv, { out = console.log, err = console.error } = {}
 
   if (command === 'list') {
     await client.connect();
-    const runs = await client.call('/api/runs');
+    // The server searches; tags and project narrow the result here, the way the browser's filters do.
+    const found = await client.call(`/api/runs${options.search ? `?q=${encodeURIComponent(options.search)}` : ''}`);
+    const tags = options.tag.map(t => t.toLowerCase()), project = options.project?.toLowerCase();
+    const runs = found.filter(run => Boolean(run.archived) === Boolean(options.archived)
+      && tags.every(t => (run.pin?.tags || []).some(have => have.toLowerCase() === t))
+      && (project === undefined || (run.pin?.project || '').toLowerCase() === project));
     if (options.json) { out(JSON.stringify(runs, null, 2)); return 0; }
-    for (const run of runs.slice(0, 20)) out(`${run.id.slice(0, 8)}  ${String(run.status).padEnd(11)} ${new Date(run.createdAt).toLocaleString()}  ${(run.prompt || '').replace(/\s+/g, ' ').slice(0, 70)}`);
+    if (!runs.length) { out(options.archived ? 'The Archive is empty' + (options.search || tags.length || project !== undefined ? ' for that search.' : '.') : 'No meetings' + (options.search || tags.length || project !== undefined ? ' match.' : ' yet.')); return 0; }
+    const snippet = run => run.match?.snippet ? `\n          ${run.match.field}: ${run.match.snippet.slice(0, 110)}` : '';
+    if (options.archived) {
+      for (const run of runs) out(`${run.id.slice(0, 8)}  ${String(run.status).padEnd(11)} ${new Date(run.createdAt).toLocaleString()}  ${(run.title || (run.demo ? 'Scripted demo' : run.prompt) || '').replace(/\s+/g, ' ').slice(0, 70)}  (archived ${new Date(run.archived.at).toLocaleDateString()})${snippet(run)}`);
+      return 0;
+    }
+    // Pinned meetings first, as in the browser, then the most recent others.
+    const pinned = runs.filter(run => run.pin), recent = runs.filter(run => !run.pin).slice(0, options.search ? 50 : 20);
+    const line = run => `${run.id.slice(0, 8)}  ${String(run.status).padEnd(11)} ${new Date(run.createdAt).toLocaleString()}  ${(run.title || (run.demo ? 'Scripted demo' : run.prompt) || '').replace(/\s+/g, ' ').slice(0, 70)}`;
+    if (pinned.length) {
+      out('Pinned');
+      for (const run of pinned) out(`${line(run)}${run.pin.project ? `  [${run.pin.project}]` : ''}${run.pin.tags?.length ? `  ${run.pin.tags.map(t => `#${t}`).join(' ')}` : ''}${snippet(run)}`);
+      out(recent.length ? '\nRecent' : '');
+    }
+    for (const run of recent) out(`${line(run)}${run.pruneBlocked ? `  (past the limit but kept: ${run.pruneBlocked})` : run.expiring ? '  (deleted when the next meeting starts)' : ''}${snippet(run)}`);
+    return 0;
+  }
+  if (command === 'archive' || command === 'unarchive') {
+    const id = options._[1] || fail(`overrule ${command} needs a meeting id.`);
+    await client.connect();
+    const found = await onlyMeeting(client, id);
+    const result = await client.call(`/api/runs/${found.id}/archive`, command === 'archive' ? 'PUT' : 'DELETE');
+    if (options.json) out(JSON.stringify({ id: found.id, ...result }, null, 2));
+    else if (command === 'archive') out(`Archived ${found.id.slice(0, 8)}. It is kept in full and listed with overrule list --archived.`);
+    else out(`Unarchived ${found.id.slice(0, 8)}.${result.expiring ? ' It is past the history limit, so the next meeting started deletes it. Pin it to keep it.' : ''}`);
+    return 0;
+  }
+  if (command === 'settings') {
+    await client.connect();
+    const count = n => Number(n).toLocaleString('en-US');
+    const size = bytes => bytes === null || bytes === undefined ? 'an unknown amount' : bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : bytes >= 1024 ** 2 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    if (options.keep !== undefined) {
+      const keep = String(options.keep).toLowerCase();
+      if (!['max', 'all'].includes(keep) && !/^\d+$/.test(keep)) fail('--keep takes a number of meetings, or "max" for as many as the disk safely holds.');
+      const saved = await client.call('/api/settings', 'PUT', { historyLimit: keep === 'max' || keep === 'all' ? 'max' : Number(keep) });
+      if (options.json) { out(JSON.stringify(saved, null, 2)); return 0; }
+      out(saved.historyLimit === 'max' ? `The history now keeps as many meetings as the disk safely holds${saved.room === null ? '' : `: about ${count(saved.room)} right now`}.` : `The history now keeps the ${count(saved.historyLimit)} most recent meetings, not counting pinned or archived ones.`);
+      if (saved.expiring) out(`${saved.expiring} meeting${saved.expiring === 1 ? ' is' : 's are'} past that limit and will be deleted when the next meeting starts. Pin or archive any you want to keep.`);
+      return 0;
+    }
+    const current = await client.call('/api/settings');
+    if (options.json) { out(JSON.stringify(current, null, 2)); return 0; }
+    const fits = current.capacity, { meetingsBytes, freeBytes, diskBytes } = current.storage;
+    out(`History: ${current.historyLimit === 'max' ? 'keeps as many meetings as the disk safely holds' : `keeps the ${count(current.historyLimit)} most recent meetings`}, not counting pinned or archived ones.`);
+    out(`Storage: meetings use ${size(meetingsBytes)}; the disk has ${size(freeBytes)} free${diskBytes ? ` of ${size(diskBytes)}` : ''}.`);
+    if (!fits) out('Room: the free space could not be read, so no upper limit applies.');
+    else {
+      out(`Room: meetings may use ${fits.growthBytes > 0 ? size(fits.growthBytes) : 'nothing'} more (half the free space, keeping ${size(fits.reserveBytes)} free). At about ${size(fits.perMeetingBytes)} a meeting, that is ${count(fits.more)} more: up to ${count(fits.room)} in all.`);
+      if (fits.low) out('Free space is low: the history is holding at its size, and each new meeting replaces the oldest unpinned one.');
+    }
+    return 0;
+  }
+  if (command === 'rename') {
+    const id = options._[1] || fail('overrule rename needs a meeting id.');
+    if (options._.length < 3) fail('Give the new name: overrule rename <id> "<name>". An empty name, "", lists the meeting by its brief again.');
+    await client.connect();
+    const found = await onlyMeeting(client, id);
+    const result = await client.call(`/api/runs/${found.id}/title`, 'PUT', { title: options._.slice(2).join(' ') });
+    if (options.json) out(JSON.stringify({ id: found.id, ...result }, null, 2));
+    else out(result.title ? `Renamed ${found.id.slice(0, 8)} to "${result.title}".` : `Removed the name of ${found.id.slice(0, 8)}; it is listed by its brief again.`);
+    return 0;
+  }
+  if (command === 'pin' || command === 'unpin') {
+    const id = options._[1] || fail(`overrule ${command} needs a meeting id.`);
+    await client.connect();
+    const found = await onlyMeeting(client, id);
+    if (command === 'unpin') {
+      if (!found.pin) fail(`Meeting ${found.id.slice(0, 8)} is not pinned.`);
+      const result = await client.call(`/api/runs/${found.id}/pin`, 'DELETE');
+      if (options.json) out(JSON.stringify({ id: found.id, ...result }, null, 2));
+      else out(`Unpinned ${found.id.slice(0, 8)}.${result.expiring ? ' It is past the recent-meeting limit, so the next meeting started removes it. Pin it again to keep it.' : ''}`);
+      return 0;
+    }
+    // Only what was given changes: --tag replaces the tags, --project the project; pinning again with neither keeps both.
+    const body = { ...(options.tag.length ? { tags: options.tag } : {}), ...(options.project !== undefined ? { project: options.project } : {}) };
+    const { pin } = await client.call(`/api/runs/${found.id}/pin`, 'PUT', body);
+    if (options.json) out(JSON.stringify({ id: found.id, pin }, null, 2));
+    else out(`Pinned ${found.id.slice(0, 8)}${pin.project ? ` under ${pin.project}` : ''}${pin.tags.length ? ` with ${pin.tags.map(t => `#${t}`).join(' ')}` : ''}.`);
+    return 0;
+  }
+  if (command === 'delete') {
+    const id = options._[1] || fail('overrule delete needs a meeting id.');
+    await client.connect();
+    const found = await onlyMeeting(client, id);
+    if (found.status === 'running') fail(`Meeting ${found.id.slice(0, 8)} is in session. Stop it first, then delete it.`);
+    if (found.pin) fail(`Meeting ${found.id.slice(0, 8)} is pinned. Unpin it first (overrule unpin ${found.id.slice(0, 8)}), then delete it.`);
+    if (!options.yes) {
+      const summary = `${found.id.slice(0, 8)} (${found.status}) ${(found.demo ? 'Scripted demo' : found.prompt || '').replace(/\s+/g, ' ').slice(0, 70)}`;
+      const agreed = await confirm(`Delete meeting ${summary} permanently?\nThis removes its record, documents, patch files, and any candidate branch it left in the workspace. [y/N] `);
+      if (agreed === null) fail('Not deleted: there is no terminal to confirm on. Pass --yes to delete without asking.');
+      if (!agreed) fail('Not deleted.');
+    }
+    const result = await client.call(`/api/runs/${found.id}`, 'DELETE');
+    if (options.json) out(JSON.stringify(result, null, 2));
+    else out(`Deleted ${found.id.slice(0, 8)}${result.removed?.branch ? ` and its branch ${result.removed.branch}` : ''}.`);
     return 0;
   }
   if (command === 'resume' || command === 'reconvene') {

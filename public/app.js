@@ -1,4 +1,4 @@
-import { assessResult, callsUsed, elapsedBudget, estimateCalls, citationEvidence, issueStatus } from './meeting-state.js';
+import { assessResult, callsUsed, elapsedBudget, estimateCalls, citationEvidence, issueStatus, expiring, HISTORY_LIMIT, parseQuery } from './meeting-state.js';
 import { PLAYBOOKS, buildPlaybook } from './playbooks.js';
 
 const $ = id => document.getElementById(id);
@@ -11,14 +11,14 @@ function toast(message) { $('toast').textContent = message; $('toast').classList
 const DRAFT_KEY = 'mesh-draft';
 function saveDraft() { try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ prompt: $('prompt').value, rounds: $('rounds').value, revisions: $('revisions').value, research: $('research').checked, deepResearch: $('deep-research').checked, maxCalls: $('max-calls').value, duration: $('duration').value, synthesizer: $('synthesizer').value, selected: [...state.selected], maxTokens: $('max-tokens').value, timeout: $('timeout').value, workspacePath: $('workspace-path').value, workspaceChecks: $('workspace-checks').value })); } catch {} }
 function readDraft() { try { return JSON.parse(localStorage.getItem(DRAFT_KEY)) || {}; } catch { return {}; } }
-async function api(path, method = 'GET', data, retried = false) {
-  const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json', 'X-Mesh-Token': state.token || '' }, ...(data !== undefined ? { body: JSON.stringify(data) } : {}) });
+async function api(path, method = 'GET', data, retried = false, signal) {
+  const response = await fetch(path, { method, signal, headers: { 'Content-Type': 'application/json', 'X-Mesh-Token': state.token || '' }, ...(data !== undefined ? { body: JSON.stringify(data) } : {}) });
   if (response.status === 401) { if ($('prompt').value.trim()) saveDraft(); location.assign('/'); throw new Error('Pair this device again to continue.'); }
   const result = await response.json().catch(() => ({}));
   if (response.status === 403 && result.code === 'stale-token' && !retried) {
     // The server restarted and issued a new mutation token: pick it up and retry once instead of failing every save.
     const fresh = await fetch('/api/bootstrap');
-    if (fresh.ok) { state.token = (await fresh.json()).token; return api(path, method, data, true); }
+    if (fresh.ok) { state.token = (await fresh.json()).token; return api(path, method, data, true, signal); }
   }
   if (!response.ok) throw new Error(result.error || 'Request failed.'); return result;
 }
@@ -40,8 +40,9 @@ function available(p) { return !['attention', 'missing'].includes(readiness(p).l
 function status(p) { return readiness(p).text; }
 function badge(p) { return `<span class="provider-icon ${colors[p.type]}">${glyphs[p.type]}</span>`; }
 function showPage(page) {
-  for (const name of ['workspace', 'connections', 'security']) { $(name).classList.toggle('hidden', page !== name); $(`${name}-nav`).classList.toggle('active', page === name); }
-  $('page-crumb').textContent = page === 'connections' ? 'Connections' : page === 'security' ? 'Security' : currentRun ? 'Discussion' : 'New discussion';
+  for (const name of ['workspace', 'connections', 'security', 'archive']) { $(name).classList.toggle('hidden', page !== name); $(`${name}-nav`).classList.toggle('active', page === name); }
+  $('page-crumb').textContent = page === 'connections' ? 'Connections' : page === 'security' ? 'Security' : page === 'archive' ? 'Archive' : currentRun ? 'Discussion' : 'New discussion';
+  if (page === 'archive') { renderArchive(); $('archive-search').focus(); }
   if (page === 'security') loadSecurity().catch(error => toast(error.message));
 }
 function renderProviders() {
@@ -250,11 +251,501 @@ function drawMesh() {
   if (!n) svg += '<text x="170" y="221" class="mesh-node-label">Select your participants</text>';
   $('mesh-diagram').innerHTML = svg;
 }
-function renderHistory() {
-  $('history').innerHTML = state.runs.length ? state.runs.map(run => `<button class="history-item ${currentRun?.id === run.id ? 'current' : ''}" data-run="${run.id}"><span class="history-dot ${run.status}"></span><span>${escapeHTML(run.demo ? 'Scripted demo' : run.prompt)}<small>${new Date(run.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}, ${escapeHTML(run.status)}</small></span></button>`).join('') : '<p class="history-empty">A new perspective<br>starts with a question.</p>';
-  $('history').querySelectorAll('[data-run]').forEach(button => button.onclick = () => loadRun(button.dataset.run));
+const BIN_ICON = '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9.5h6.6L12 4M6.75 6.5v5M9.25 6.5v5"/></svg>';
+const PIN_ICON = filled => `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 2h3v4l2 3h-7l2-3z"${filled ? ' fill="currentColor"' : ''}/><path d="M5.5 2h5M8 9v5"/></svg>`;
+const EDIT_ICON = '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 2.5l3 3L6 13H3v-3zM9 4l3 3"/></svg>';
+// How a meeting is named everywhere in the interface: the name the owner gave it, otherwise its brief.
+const runLabel = run => run.title || (run.demo ? 'Scripted demo' : run.prompt);
+const shortDate = iso => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+// Which project groups are folded away is a preference of this browser, like the draft; the pins themselves live on the server.
+const COLLAPSED_KEY = 'overrule-collapsed-projects';
+const collapsedProjects = new Set((() => { try { return JSON.parse(localStorage.getItem(COLLAPSED_KEY)) || []; } catch { return []; } })());
+const saveCollapsed = () => { try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsedProjects])); } catch {} };
+const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' });
+const projectsInUse = () => [...new Set(state.runs.map(r => r.pin?.project).filter(Boolean))].sort(byName);
+const MORE_ICON = '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="currentColor"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>';
+// The limit the server applies now: the setting, or fewer if the disk has no room for that many. Infinity when none applies.
+const historyLimit = () => state.settings ? state.settings.effectiveLimit ?? Infinity : HISTORY_LIMIT;
+const FIELD_LABELS = { tags: 'Tags', brief: 'Brief', details: 'Details', answer: 'Answer', transcript: 'Transcript' };
+// An excerpt is worth a line only when it shows something the listing does not: tags and projects are already on screen, and an
+// unnamed meeting is listed by its brief, whose first words are its title.
+const showSnippet = (run, match) => Boolean(match?.snippet) && match.field !== 'tags' && !(match.field === 'brief' && !run.title && match.at < 28);
+const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// Escapes the text, then marks the search terms in it. The pattern is built from escaped terms, so nothing in a query is markup.
+function highlight(text, query) {
+  const terms = parseQuery(query);
+  if (!terms.length) return escapeHTML(text);
+  let out = '', last = 0;
+  for (const found of String(text).matchAll(new RegExp(terms.map(escapeRegExp).join('|'), 'giu'))) {
+    out += escapeHTML(text.slice(last, found.index)) + `<mark>${escapeHTML(found[0])}</mark>`; last = found.index + found[0].length;
+  }
+  return out + escapeHTML(text.slice(last));
 }
-async function refreshHistory() { state.runs = await api('/api/runs'); renderHistory(); }
+function historyRow(run) {
+  const label = runLabel(run), id = escapeHTML(run.id), pinned = Boolean(run.pin), short = escapeHTML(label.slice(0, 80));
+  const match = view.matches?.get(run.id);
+  // Tags double as filters: clicking one shows only meetings with that tag.
+  const tags = pinned && run.pin.tags?.length ? `<span class="history-tags">${run.pin.tags.map(t => `<span class="tag${view.tags.has(t) ? ' active' : ''}" data-filter-tag="${escapeHTML(t)}" title="Show only meetings tagged ${escapeHTML(t)}">${escapeHTML(t)}</span>`).join('')}</span>` : '';
+  const found = showSnippet(run, match) ? `<span class="history-snippet"><em>${FIELD_LABELS[match.field] || 'Found'}:</em> ${highlight(match.snippet, view.query)}</span>` : '';
+  // Past the limit: say it goes, and that it goes completely, naming a branch whose changes would be lost. Or say why it could not go.
+  const branch = run.workspace?.unappliedBranch;
+  const leaving = run.pruneBlocked ? `<span class="history-expiring">Past the history limit but kept: ${escapeHTML(run.pruneBlocked)} It is removed once that is resolved.</span>`
+    : run.expiring ? `<span class="history-expiring">Deleted when the next meeting starts${branch ? `, with its unapplied branch ${escapeHTML(branch)}` : ''}. Pin or archive it to keep it.</span>` : '';
+  return `<div class="history-row${pinned ? ' pinned' : ''}${currentRun?.id === run.id ? ' current' : ''}"><button class="history-item" data-run="${id}"><span class="history-dot ${escapeHTML(run.status)}"></span><span class="history-text"><span class="history-title">${highlight(label, view.query)}</span><small>${shortDate(run.createdAt)}, ${escapeHTML(run.status)}</small>${tags}${found}${leaving}</span></button><span class="history-actions"><button type="button" class="history-action history-pin" data-pin-run="${id}" aria-pressed="${pinned}" aria-label="${pinned ? 'Pinned; edit or unpin' : 'Pin'} meeting: ${short}" title="${pinned ? 'Pinned. Edit tags and project, or unpin' : 'Pin to the top'}">${PIN_ICON(pinned)}</button><button type="button" class="history-action history-more" data-menu-run="${id}" aria-haspopup="menu" aria-expanded="false" aria-label="More actions for meeting: ${short}" title="Rename, archive, or delete">${MORE_ICON}</button></span></div>`;
+}
+// ---------- search and filters ----------
+// Typing searches on the server, which reads every meeting in full; project and tag chips narrow what it found. Archived meetings
+// are left out of the list, and counted so the owner knows to look in the Archive.
+const RECENT_PAGE = 50;
+const view = { query: '', matches: null, tags: new Set(), project: null, allFilters: false, recentShown: RECENT_PAGE, archiveQuery: '', archiveMatches: null };
+const filtering = () => Boolean(view.matches || view.tags.size || view.project);
+const passes = run => (!view.matches || view.matches.has(run.id)) && (!view.project || run.pin?.project === view.project) && [...view.tags].every(t => (run.pin?.tags || []).includes(t));
+const searches = {};
+async function runSearch(which) {
+  const query = which === 'archive' ? view.archiveQuery : view.query, key = which === 'archive' ? 'archiveMatches' : 'matches';
+  searches[which]?.abort();
+  if (!parseQuery(query).length) { view[key] = null; return true; }
+  const controller = searches[which] = new AbortController();
+  try {
+    const found = await api(`/api/runs?q=${encodeURIComponent(query)}`, 'GET', undefined, false, controller.signal);
+    view[key] = new Map(found.map(r => [r.id, r.match]));
+    return true;
+  } catch (error) { if (error.name !== 'AbortError') toast(error.message); return false; }
+}
+function searchAsYouType(input, which, render) {
+  let timer;
+  input.addEventListener('input', () => {
+    view[which === 'archive' ? 'archiveQuery' : 'query'] = input.value; view.recentShown = RECENT_PAGE;
+    clearTimeout(timer);
+    // An emptied box shows everything at once; otherwise wait for a pause in typing, and drop any answer a newer query replaced.
+    if (!parseQuery(input.value).length) { searches[which]?.abort(); view[which === 'archive' ? 'archiveMatches' : 'matches'] = null; return render(); }
+    timer = setTimeout(async () => { if (await runSearch(which)) render(); }, 150);
+  });
+  input.addEventListener('keydown', event => { if (event.key === 'Escape' && input.value) { event.preventDefault(); input.value = ''; input.dispatchEvent(new Event('input')); } });
+}
+function clearFilters() {
+  $('history-search').value = ''; view.query = ''; view.matches = null; view.tags.clear(); view.project = null; searches.history?.abort(); renderHistory();
+}
+function toggleTag(tag) { view.tags.has(tag) ? view.tags.delete(tag) : view.tags.add(tag); view.recentShown = RECENT_PAGE; renderHistory(); }
+function renderFilters() {
+  const live = state.runs.filter(r => !r.archived);
+  const projects = [...new Set(live.map(r => r.pin?.project).filter(Boolean))].sort(byName);
+  const counts = new Map(); for (const r of live) for (const t of r.pin?.tags || []) counts.set(t, (counts.get(t) || 0) + 1);
+  // A filter whose tag or project no longer exists (its last meeting was unpinned or archived) would hide everything: drop it.
+  for (const t of [...view.tags]) if (!counts.has(t)) view.tags.delete(t);
+  if (view.project && !projects.includes(view.project)) view.project = null;
+  const tags = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a) || byName(a, b));
+  const chips = [...projects.map(p => `<button type="button" class="filter-chip project" data-chip-project="${escapeHTML(p)}" aria-pressed="${view.project === p}" title="Show only the ${escapeHTML(p)} project">${escapeHTML(p)}</button>`),
+    ...tags.map(t => `<button type="button" class="filter-chip" data-chip-tag="${escapeHTML(t)}" aria-pressed="${view.tags.has(t)}" title="Show only meetings tagged ${escapeHTML(t)}">#${escapeHTML(t)}</button>`)];
+  const limit = 10, hidden = view.allFilters ? 0 : Math.max(0, chips.length - limit);
+  $('history-filters').classList.toggle('hidden', !chips.length);
+  $('history-filters').innerHTML = chips.slice(0, chips.length - hidden).join('') + (hidden ? `<button type="button" class="filter-more" data-chips-more>+${hidden} more</button>` : view.allFilters && chips.length > limit ? '<button type="button" class="filter-more" data-chips-more>Fewer</button>' : '');
+  $('history-filters').querySelectorAll('[data-chip-project]').forEach(b => b.onclick = () => { view.project = view.project === b.dataset.chipProject ? null : b.dataset.chipProject; view.recentShown = RECENT_PAGE; renderHistory(); });
+  $('history-filters').querySelectorAll('[data-chip-tag]').forEach(b => b.onclick = () => toggleTag(b.dataset.chipTag));
+  $('history-filters').querySelector('[data-chips-more]')?.addEventListener('click', () => { view.allFilters = !view.allFilters; renderFilters(); });
+}
+function renderHistory() {
+  renderFilters();
+  const live = state.runs.filter(r => !r.archived), shown = live.filter(passes), searching = filtering();
+  // Pinned first, most recently pinned on top: loose pins, then one group per project. Everything else keeps its date order below,
+  // a page at a time, since a history that keeps every meeting can grow long.
+  const pinned = shown.filter(r => r.pin).sort((a, b) => String(b.pin.pinnedAt || '').localeCompare(String(a.pin.pinnedAt || '')));
+  const recent = shown.filter(r => !r.pin), visible = recent.slice(0, view.recentShown), more = recent.length - visible.length;
+  let html = '';
+  if (pinned.length) {
+    html += `<div class="history-heading">Pinned <span class="count">${pinned.length}</span></div>` + pinned.filter(r => !r.pin.project).map(historyRow).join('');
+    for (const project of [...new Set(pinned.map(r => r.pin.project).filter(Boolean))].sort(byName)) {
+      // While searching, every group is open: a match folded out of sight would look like no match at all.
+      const members = pinned.filter(r => r.pin.project === project), open = searching || !collapsedProjects.has(project);
+      html += `<div class="history-group"><button type="button" class="history-group-head" data-project="${escapeHTML(project)}" aria-expanded="${open}"${searching ? ' disabled' : ''}><span class="caret" aria-hidden="true">${open ? '▾' : '▸'}</span><span class="history-group-name">${escapeHTML(project)}</span><span class="count">${members.length}</span></button>${open ? members.map(historyRow).join('') : ''}</div>`;
+    }
+  }
+  if (recent.length || !searching) html += '<div class="history-heading">Recent meetings</div>';
+  if (recent.length) html += visible.map(historyRow).join('') + (more ? `<button type="button" class="history-more-button" data-show-more>Show ${Math.min(more, RECENT_PAGE)} more of ${more}</button>` : '');
+  else if (!searching) html += `<p class="history-empty">${pinned.length ? 'Meetings you have not pinned appear here.' : 'A new perspective<br>starts with a question.'}</p>`;
+  if (searching && !shown.length) html += '<p class="history-empty">No meetings match.</p>';
+  $('history').innerHTML = html;
+  // What the filter found, what it hides, and where else to look.
+  const inArchive = view.matches ? state.runs.filter(r => r.archived && view.matches.has(r.id)).length : 0;
+  $('history-summary').classList.toggle('hidden', !searching);
+  $('history-summary').innerHTML = searching ? `${shown.length} of ${live.length} ${live.length === 1 ? 'meeting matches' : 'meetings match'}.${inArchive ? ` <button type="button" class="text-button" data-to-archive>${inArchive} in the Archive</button>` : ''} <button type="button" class="text-button" data-clear-filters>Clear</button>` : '';
+  $('history-summary').querySelector('[data-clear-filters]')?.addEventListener('click', clearFilters);
+  $('history-summary').querySelector('[data-to-archive]')?.addEventListener('click', () => { $('archive-search').value = view.query; view.archiveQuery = view.query; view.archiveMatches = view.matches; showPage('archive'); });
+  $('history').querySelectorAll('[data-run]').forEach(button => button.onclick = event => {
+    const tag = event.target.closest('[data-filter-tag]');
+    return tag ? toggleTag(tag.dataset.filterTag) : loadRun(button.dataset.run);
+  });
+  $('history').querySelectorAll('[data-pin-run]').forEach(button => button.onclick = () => openPin(button.dataset.pinRun));
+  $('history').querySelectorAll('[data-menu-run]').forEach(button => button.onclick = () => openRowMenu(button, button.dataset.menuRun));
+  $('history').querySelector('[data-show-more]')?.addEventListener('click', () => { view.recentShown += RECENT_PAGE; renderHistory(); });
+  $('history').querySelectorAll('[data-project]').forEach(button => button.onclick = () => {
+    const name = button.dataset.project; collapsedProjects.has(name) ? collapsedProjects.delete(name) : collapsedProjects.add(name); saveCollapsed(); renderHistory();
+  });
+  renderArchive();
+}
+async function refreshHistory() {
+  state.runs = await api('/api/runs');
+  // A search already showing is asked again, so a meeting that just finished or changed is found, or dropped, like the rest.
+  if (view.matches) await runSearch('history');
+  if (view.archiveMatches) await runSearch('archive');
+  renderHistory();
+}
+searchAsYouType($('history-search'), 'history', renderHistory);
+searchAsYouType($('archive-search'), 'archive', renderArchive);
+// ---------- the row menu ----------
+// One menu per row holds the actions that do not fit beside it. Items that cannot act yet stay listed, disabled, with the reason.
+let menuFor = null;
+function closeRowMenu(refocus = false) {
+  if (!menuFor) return;
+  const button = $('history').querySelector(`[data-menu-run="${CSS.escape(menuFor)}"]`);
+  button?.setAttribute('aria-expanded', 'false');
+  $('row-menu').classList.add('hidden'); menuFor = null;
+  if (refocus) button?.focus();
+}
+function openRowMenu(button, id) {
+  if (menuFor === id) return closeRowMenu(true);
+  closeRowMenu();
+  const run = state.runs.find(r => r.id === id); if (!run) return;
+  const running = run.status === 'running';
+  const items = [
+    ['rename', run.title ? 'Rename…' : 'Name…', ''],
+    ['pin', run.pin ? 'Edit pin…' : 'Pin…', ''],
+    ['archive', 'Archive', running ? 'Stop it before archiving it.' : ''],
+    ['delete', 'Delete…', running ? 'Stop it before deleting it.' : run.pin ? 'Unpin it before deleting it.' : ''],
+  ];
+  const menu = $('row-menu');
+  menu.innerHTML = items.map(([action, label, blocked]) => `<button type="button" role="menuitem" class="row-menu-item${action === 'delete' ? ' danger' : ''}" data-menu-action="${action}"${blocked ? ` aria-disabled="true" data-blocked="${escapeHTML(blocked)}"` : ''}>${label}${blocked ? `<small>${escapeHTML(blocked)}</small>` : ''}</button>`).join('');
+  menu.classList.remove('hidden'); menuFor = id; button.setAttribute('aria-expanded', 'true');
+  const at = button.getBoundingClientRect(), size = menu.getBoundingClientRect();
+  menu.style.top = `${Math.max(8, Math.min(at.bottom + 4, innerHeight - size.height - 8))}px`;
+  menu.style.left = `${Math.max(8, Math.min(at.left, innerWidth - size.width - 8))}px`;
+  menu.querySelectorAll('[data-menu-action]').forEach(item => item.onclick = () => {
+    if (item.dataset.blocked) return toast(item.dataset.blocked);
+    closeRowMenu();
+    ({ rename: () => openRename(id), pin: () => openPin(id), archive: () => archiveRun(id), delete: () => confirmDelete(id) })[item.dataset.menuAction]();
+  });
+  menu.querySelector('[role=menuitem]').focus();
+}
+$('row-menu').addEventListener('keydown', event => {
+  const items = [...$('row-menu').querySelectorAll('[role=menuitem]')], at = items.indexOf(document.activeElement);
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); items[(at + (event.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].focus(); }
+  else if (event.key === 'Home' || event.key === 'End') { event.preventDefault(); items[event.key === 'Home' ? 0 : items.length - 1].focus(); }
+  else if (event.key === 'Escape') { event.preventDefault(); closeRowMenu(true); }
+  else if (event.key === 'Tab') closeRowMenu();
+});
+document.addEventListener('pointerdown', event => { if (menuFor && !event.target.closest('#row-menu, [data-menu-run]')) closeRowMenu(); });
+$('history').addEventListener('scroll', () => closeRowMenu());
+window.addEventListener('resize', () => closeRowMenu());
+// ---------- the archive ----------
+function archiveRow(run) {
+  const label = runLabel(run), id = escapeHTML(run.id), match = view.archiveMatches?.get(run.id);
+  const meta = [`${shortDate(run.createdAt)}, ${escapeHTML(run.status)}`, `archived ${shortDate(run.archived.at)}`, run.pin ? `pinned${run.pin.project ? ` in ${escapeHTML(run.pin.project)}` : ''}` : ''].filter(Boolean).join(' · ');
+  const tags = run.pin?.tags?.length ? `<span class="history-tags">${run.pin.tags.map(t => `<span class="tag">${escapeHTML(t)}</span>`).join('')}</span>` : '';
+  const found = showSnippet(run, match) ? `<p class="history-snippet"><em>${FIELD_LABELS[match.field] || 'Found'}:</em> ${highlight(match.snippet, view.archiveQuery)}</p>` : '';
+  return `<article class="card archive-item"><div class="archive-main"><button type="button" class="archive-open" data-open-run="${id}"><span class="history-dot ${escapeHTML(run.status)}"></span><span>${highlight(label, view.archiveQuery)}</span></button><p class="archive-meta">${meta}</p>${tags}${found}</div><div class="archive-actions"><button type="button" class="button secondary" data-unarchive-run="${id}">Unarchive</button><button type="button" class="button danger" data-delete-archived="${id}">Delete</button></div></article>`;
+}
+function renderArchive() {
+  const archived = state.runs.filter(r => r.archived).sort((a, b) => String(b.archived.at).localeCompare(String(a.archived.at)));
+  $('archive-count').textContent = archived.length; $('archive-count').classList.toggle('hidden', !archived.length);
+  if ($('archive').classList.contains('hidden')) return;
+  const shown = archived.filter(r => !view.archiveMatches || view.archiveMatches.has(r.id));
+  $('archive-search').classList.toggle('hidden', !archived.length);
+  $('archive-summary').innerHTML = !archived.length ? '' : view.archiveMatches ? `${shown.length} of ${archived.length} archived ${archived.length === 1 ? 'meeting matches' : 'meetings match'}.` : `${archived.length} archived ${archived.length === 1 ? 'meeting' : 'meetings'}, most recently archived first.`;
+  $('archive-list').innerHTML = shown.length ? shown.map(archiveRow).join('')
+    : archived.length ? '<p class="empty-copy">No archived meetings match.</p>'
+    : '<p class="empty-copy">Nothing is archived. Choose Archive from a meeting’s ⋯ menu in the history, or in the meeting itself, to keep it here out of the way.</p>';
+  $('archive-list').querySelectorAll('[data-open-run]').forEach(b => b.onclick = () => loadRun(b.dataset.openRun));
+  $('archive-list').querySelectorAll('[data-unarchive-run]').forEach(b => b.onclick = () => unarchiveRun(b.dataset.unarchiveRun));
+  $('archive-list').querySelectorAll('[data-delete-archived]').forEach(b => b.onclick = () => confirmDelete(b.dataset.deleteArchived));
+}
+function applyArchive(id, archived) {
+  for (const run of state.runs) if (run.id === id) run.archived = archived;
+  if (currentRun?.id === id) { currentRun.archived = archived; renderRun(currentRun); }
+  renderHistory(); refreshHistory().catch(() => {});
+}
+async function archiveRun(id) {
+  try { const { archived } = await api(`/api/runs/${encodeURIComponent(id)}/archive`, 'PUT'); applyArchive(id, archived); toast('Archived. It is kept in full under Archive.'); }
+  catch (error) { toast(error.message); }
+}
+async function unarchiveRun(id) {
+  const run = state.runs.find(r => r.id === id) || (currentRun?.id === id ? currentRun : null);
+  if (!run?.archived) return;
+  // Back in the list it counts toward the limit again, so say first if that makes it the next to go.
+  const leaves = expiring(state.runs.map(r => r.id === id ? { ...r, archived: null } : r), historyLimit()).has(id);
+  if (leaves && !(await confirmAction({ title: 'Unarchive this meeting?', ok: 'Unarchive', body: `<p>It goes back to <strong>Recent meetings</strong> in date order.</p><p class="warn">It is older than your ${historyLimit()} most recent meetings, so when the next meeting starts it is deleted completely, as Delete would: its record, documents, and patches${run.workspace?.unappliedBranch ? `, and its unapplied branch ${escapeHTML(run.workspace.unappliedBranch)}` : ''}. Pin it to keep it, or leave it archived.</p>` }))) return;
+  try {
+    const result = await api(`/api/runs/${encodeURIComponent(id)}/archive`, 'DELETE'); applyArchive(id, null);
+    toast(result.expiring ? 'Unarchived. It is deleted when the next meeting starts unless you pin it.' : run.pin ? 'Unarchived. It is back under Pinned.' : 'Unarchived. It is back in the meeting list.');
+  } catch (error) { toast(error.message); }
+}
+function renderArchiveControls(run) {
+  const archived = Boolean(run.archived);
+  $('archive-run').classList.toggle('hidden', archived || run.status === 'running');
+  $('run-archived').classList.toggle('hidden', !archived);
+  if (!archived) return;
+  $('run-archived-text').textContent = `Archived ${new Date(run.archived.at).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}. It is kept in full and hidden from the meeting list. Unarchive it to resume or reconvene it.`;
+  for (const id of ['resume', 'limit-form', 'reconvene-form']) $(id).classList.add('hidden');
+}
+$('archive-run').onclick = () => currentRun && archiveRun(currentRun.id);
+$('unarchive-run').onclick = () => currentRun && unarchiveRun(currentRun.id);
+// ---------- settings ----------
+// The history keeps a number of meetings the owner picks, up to what the disk has room for, or as many as the disk safely holds.
+// The dialog shows the arithmetic behind that room, and what a change would delete, before anything is saved.
+const sizeText = bytes => bytes === null || bytes === undefined ? 'an unknown amount' : bytes < 1048576 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : bytes < 1073741824 ? `${(bytes / 1048576).toFixed(1)} MB` : `${(bytes / 1073741824).toFixed(1)} GB`;
+const countText = n => Number(n).toLocaleString();
+let settingsView = null;
+const keepChoice = () => document.querySelector('input[name=history-keep]:checked')?.value;
+// 'max', a valid number, or undefined while the number typed is not one the server would take.
+function chosenLimit() {
+  if (keepChoice() === 'max') return 'max';
+  const value = Number($('history-limit').value), room = settingsView?.capacity?.room;
+  return Number.isSafeInteger(value) && value >= 1 && (room === undefined || value <= room) ? value : undefined;
+}
+function updateSettingsPreview() {
+  const limit = chosenLimit(), fits = settingsView?.capacity, preview = $('settings-preview');
+  $('history-limit').classList.toggle('muted-input', keepChoice() === 'max');
+  $('settings-save').disabled = limit === undefined;
+  if (limit === undefined) {
+    preview.className = 'settings-preview warn';
+    preview.textContent = fits && Number($('history-limit').value) > fits.room ? `This disk has safe room for about ${countText(fits.room)} meetings. Choose up to that, or choose as many as the disk safely holds.` : 'Enter a whole number of meetings, at least 1.';
+    return;
+  }
+  // The same rule the server applies at the next start: the setting, or fewer if the disk has no room for that many.
+  const applied = Math.min(limit === 'max' ? Infinity : limit, fits ? fits.atNextStart : Infinity);
+  const leaving = expiring(state.runs, applied).size;
+  preview.className = `settings-preview${leaving ? ' warn' : ' hidden'}`;
+  preview.textContent = leaving ? `${leaving} ${leaving === 1 ? 'meeting is' : 'meetings are'} past that limit and will be deleted, completely, when the next meeting starts. Pin or archive any you want to keep; they are marked in the history.` : '';
+}
+function renderSettings(view) {
+  settingsView = view;
+  const fits = view.capacity, { meetingsBytes, freeBytes, diskBytes } = view.storage, p = view.policy;
+  const max = view.historyLimit === 'max';
+  for (const input of document.querySelectorAll('input[name=history-keep]')) input.checked = input.value === (max ? 'max' : 'limit');
+  $('history-limit').value = max ? Math.min(HISTORY_LIMIT, fits?.room || HISTORY_LIMIT) : view.historyLimit;
+  if (fits) $('history-limit').max = fits.room; else $('history-limit').removeAttribute('max');
+  $('history-limit-hint').textContent = fits ? `Up to ${countText(fits.room)}: what fits in the space meetings may use on this disk. The default is 30.` : 'The disk’s free space could not be read, so no upper limit applies. The default is 30.';
+  $('history-max-hint').textContent = fits ? `About ${countText(fits.room)} right now. The number follows the free space: when room runs out, the history stops growing and each new meeting replaces the oldest unpinned one.` : 'The disk’s free space could not be read, so nothing is removed to make room.';
+  $('settings-low').classList.toggle('hidden', !fits?.low);
+  $('settings-low').textContent = fits?.low ? `Free space is low: meetings have no room left to grow on this disk, so the history is holding at its current size and each new meeting replaces the oldest unpinned one. Free some space, or pin or archive what you want to keep.` : '';
+  $('settings-storage').textContent = `Meetings take ${sizeText(meetingsBytes)} on the host${freeBytes === null ? '.' : `; its disk has ${sizeText(freeBytes)} free${diskBytes ? ` of ${sizeText(diskBytes)}` : ''}.`}`;
+  $('settings-math').classList.toggle('hidden', !fits);
+  if (fits) $('settings-math-text').textContent = `Meetings may grow into at most ${Math.round(p.shareOfFree * 100)}% of the free space, and the disk always keeps ${sizeText(fits.reserveBytes)} free for everything else (${Math.round(p.reserveShare * 100)}% of its size, and never less than ${sizeText(p.reserveMinBytes)}). ${fits.growthBytes > 0 ? `That leaves ${sizeText(fits.growthBytes)} for new meetings.` : 'That leaves no room for new meetings.'} A meeting is counted at ${sizeText(fits.perMeetingBytes)}: the size of the largest tenth of the meetings here, and never less than ${sizeText(p.minMeetingBytes)}. That is room for ${countText(fits.more)} more on top of the ${countText(fits.room - fits.more)} the list holds now.`;
+  updateSettingsPreview();
+}
+async function openSettings() {
+  let view;
+  try { view = await api('/api/settings'); } catch (error) { return toast(error.message); }
+  state.settings = { historyLimit: view.historyLimit, effectiveLimit: view.effectiveLimit };
+  $('settings-error').textContent = '';
+  renderSettings(view);
+  $('settings-dialog').showModal();
+}
+$('settings-button').onclick = openSettings;
+document.querySelectorAll('input[name=history-keep]').forEach(input => input.onchange = updateSettingsPreview);
+$('history-limit').addEventListener('input', () => { document.querySelector('input[name=history-keep][value=limit]').checked = true; updateSettingsPreview(); });
+$('history-limit').addEventListener('focus', () => { document.querySelector('input[name=history-keep][value=limit]').checked = true; updateSettingsPreview(); });
+$('settings-cancel').onclick = $('close-settings').onclick = () => $('settings-dialog').close();
+$('settings-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const limit = chosenLimit(); if (limit === undefined) return;
+  $('settings-save').disabled = true; $('settings-error').textContent = '';
+  try {
+    const saved = await api('/api/settings', 'PUT', { historyLimit: limit });
+    state.settings = { historyLimit: saved.historyLimit, effectiveLimit: saved.effectiveLimit }; $('settings-dialog').close();
+    await refreshHistory().catch(() => {});
+    const kept = saved.historyLimit === 'max' ? `as many meetings as the disk safely holds${saved.room === null ? '' : `, about ${countText(saved.room)} right now`}` : `the ${countText(saved.historyLimit)} most recent meetings`;
+    toast(`Saved. The history keeps ${kept}.${saved.expiring ? ` ${saved.expiring} will be deleted when the next meeting starts.` : ''}`);
+  } catch (error) { $('settings-error').textContent = error.message; }
+  finally { $('settings-save').disabled = false; }
+});
+// ---------- pinning ----------
+// One dialog pins a meeting or edits a pinned meeting's tags and project, and unpins it. The pin is stored with the meeting on the
+// server, so it survives restarts and shows on every paired device.
+let pinTarget = null;
+const parseTags = text => text.split(',').map(t => t.replace(/\s+/g, ' ').trim()).filter(Boolean);
+function renderTagSuggestions() {
+  const chosen = new Set(parseTags($('pin-tags').value).map(t => t.toLowerCase()));
+  const known = [...new Set(state.runs.flatMap(r => r.pin?.tags || []))].filter(t => !chosen.has(t.toLowerCase())).sort(byName).slice(0, 16);
+  $('pin-suggestions').classList.toggle('hidden', !known.length);
+  $('pin-suggestions').innerHTML = known.length ? `<span>Tags in use:</span>${known.map(t => `<button type="button" class="tag tag-button" data-add-tag="${escapeHTML(t)}">${escapeHTML(t)}</button>`).join('')}` : '';
+  $('pin-suggestions').querySelectorAll('[data-add-tag]').forEach(button => button.onclick = () => {
+    $('pin-tags').value = [...parseTags($('pin-tags').value), button.dataset.addTag].join(', '); renderTagSuggestions(); $('pin-tags').focus();
+  });
+}
+function openPin(id) {
+  const run = currentRun?.id === id ? currentRun : state.runs.find(r => r.id === id);
+  if (!run) return;
+  pinTarget = id;
+  $('pin-title').textContent = run.pin ? 'Pinned meeting' : 'Pin this meeting';
+  const label = runLabel(run); $('pin-prompt').textContent = label.length > 400 ? label.slice(0, 400) + '…' : label;
+  $('pin-project').value = run.pin?.project || ''; $('pin-tags').value = (run.pin?.tags || []).join(', ');
+  $('project-options').innerHTML = projectsInUse().map(p => `<option value="${escapeHTML(p)}"></option>`).join('');
+  $('pin-save').textContent = run.pin ? 'Save' : 'Pin meeting'; $('pin-save').disabled = false;
+  $('pin-unpin').classList.toggle('hidden', !run.pin);
+  $('pin-error').textContent = ''; renderTagSuggestions();
+  $('pin-dialog').showModal(); $('pin-project').focus();
+}
+// The page shows the change at once; the history is then re-read for the server's view, including which meetings are now expiring.
+function applyPin(id, pin) {
+  for (const run of state.runs) if (run.id === id) run.pin = pin;
+  if (currentRun?.id === id) { currentRun.pin = pin; renderPinControls(currentRun); }
+  renderHistory(); refreshHistory().catch(() => {});
+}
+function renderPinControls(run) {
+  $('pin-run').textContent = run.pin ? 'Edit pin' : 'Pin';
+  const pin = run.pin;
+  $('run-pin').classList.toggle('hidden', !pin);
+  $('run-pin').innerHTML = pin ? `<span class="run-pin-label">${PIN_ICON(true)} Pinned</span>${pin.project ? `<span>Project: <strong>${escapeHTML(pin.project)}</strong></span>` : ''}${pin.tags.length ? `<span class="history-tags">${pin.tags.map(t => `<span class="tag">${escapeHTML(t)}</span>`).join('')}</span>` : ''}` : '';
+}
+function confirmAction({ title, body, ok }) {
+  return new Promise(resolve => {
+    const dialog = $('confirm-dialog'); let answer = false;
+    $('confirm-title').textContent = title; $('confirm-body').innerHTML = body; $('confirm-ok').textContent = ok;
+    $('confirm-form').onsubmit = event => { event.preventDefault(); answer = true; dialog.close(); };
+    $('confirm-cancel').onclick = $('close-confirm').onclick = () => dialog.close();
+    dialog.onclose = () => resolve(answer);
+    dialog.showModal(); $('confirm-cancel').focus();
+  });
+}
+async function unpinRun(id) {
+  const run = state.runs.find(r => r.id === id) || (currentRun?.id === id ? currentRun : null);
+  if (!run?.pin) return;
+  // Unpinning clears the organization and puts the meeting back in date order, which may be past the limit: say so before it happens.
+  const lost = [run.pin.project ? `its project, ${escapeHTML(run.pin.project)}` : '', run.pin.tags?.length ? `its ${run.pin.tags.length === 1 ? 'tag' : 'tags'} (${run.pin.tags.map(escapeHTML).join(', ')})` : ''].filter(Boolean);
+  const leaves = !run.archived && expiring(state.runs.map(r => r.id === id ? { ...r, pin: null } : r), historyLimit()).has(id);
+  if (lost.length || leaves) {
+    const body = [`<p>It goes back to <strong>Recent meetings</strong> in date order.</p>`, lost.length ? `<p>Unpinning clears ${lost.join(' and ')}.</p>` : '', leaves ? `<p class="warn">It is older than your ${historyLimit()} most recent meetings, so when the next meeting starts it is deleted completely, as Delete would: its record, documents, and patches${run.workspace?.unappliedBranch ? `, and its unapplied branch ${escapeHTML(run.workspace.unappliedBranch)}` : ''}. Pin it again before then to keep it.</p>` : ''].join('');
+    if (!(await confirmAction({ title: 'Unpin this meeting?', body, ok: 'Unpin' }))) return;
+  }
+  try {
+    const result = await api(`/api/runs/${encodeURIComponent(id)}/pin`, 'DELETE');
+    applyPin(id, null);
+    toast(result.expiring ? 'Unpinned. It is deleted when the next meeting starts.' : 'Unpinned. It is back in Recent meetings.');
+  } catch (error) { toast(error.message); refreshHistory().catch(() => {}); }
+}
+$('pin-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const id = pinTarget; if (!id) return;
+  const wasPinned = Boolean((currentRun?.id === id ? currentRun : state.runs.find(r => r.id === id))?.pin);
+  $('pin-save').disabled = true; $('pin-error').textContent = '';
+  try {
+    const { pin } = await api(`/api/runs/${encodeURIComponent(id)}/pin`, 'PUT', { project: $('pin-project').value, tags: parseTags($('pin-tags').value) });
+    $('pin-dialog').close(); applyPin(id, pin);
+    toast(wasPinned ? 'Saved.' : `Pinned${pin.project ? ` under ${pin.project}` : ''}. It stays at the top and is never removed to make room.`);
+  } catch (error) { $('pin-error').textContent = error.message; $('pin-save').disabled = false; }
+});
+$('pin-tags').addEventListener('input', renderTagSuggestions);
+$('pin-cancel').onclick = $('close-pin').onclick = () => $('pin-dialog').close();
+$('pin-unpin').onclick = () => { const id = pinTarget; $('pin-dialog').close(); unpinRun(id); };
+$('pin-dialog').addEventListener('close', () => { pinTarget = null; });
+$('pin-run').onclick = () => currentRun && openPin(currentRun.id);
+// ---------- renaming ----------
+// The name is only how the meeting is listed and shown; the brief stays as the council read it. Saved on the server with the meeting.
+let renameTarget = null;
+function openRename(id) {
+  const run = currentRun?.id === id ? currentRun : state.runs.find(r => r.id === id);
+  if (!run) return;
+  renameTarget = id;
+  const brief = run.demo ? 'Scripted demo' : run.prompt;
+  $('rename-title').textContent = run.title ? 'Rename meeting' : 'Name this meeting';
+  $('rename-input').value = run.title || '';
+  $('rename-brief').textContent = brief.length > 240 ? brief.slice(0, 240) + '…' : brief;
+  $('rename-clear').classList.toggle('hidden', !run.title);
+  $('rename-error').textContent = ''; $('rename-save').disabled = false;
+  $('rename-dialog').showModal(); $('rename-input').select();
+}
+function applyTitle(id, title) {
+  for (const run of state.runs) if (run.id === id) run.title = title;
+  if (currentRun?.id === id) { currentRun.title = title; renderNameControls(currentRun); }
+  renderHistory(); refreshHistory().catch(() => {});
+}
+function renderNameControls(run) {
+  $('run-name-text').textContent = run.title || ''; $('run-name-text').classList.toggle('hidden', !run.title);
+  $('rename-run').textContent = run.title ? 'Rename' : 'Name this meeting';
+}
+async function saveTitle(title) {
+  const id = renameTarget; if (!id) return;
+  $('rename-save').disabled = true; $('rename-error').textContent = '';
+  try {
+    const result = await api(`/api/runs/${encodeURIComponent(id)}/title`, 'PUT', { title });
+    $('rename-dialog').close(); applyTitle(id, result.title);
+    toast(result.title ? 'Renamed.' : 'Name removed. The meeting is listed by its brief again.');
+  } catch (error) { $('rename-error').textContent = error.message; $('rename-save').disabled = false; }
+}
+$('rename-form').addEventListener('submit', event => { event.preventDefault(); saveTitle($('rename-input').value); });
+$('rename-clear').onclick = () => saveTitle('');
+$('rename-cancel').onclick = $('close-rename').onclick = () => $('rename-dialog').close();
+$('rename-dialog').addEventListener('close', () => { renameTarget = null; });
+$('rename-run').onclick = () => currentRun && openRename(currentRun.id);
+// ---------- deleting a meeting ----------
+// The dialog reads the full meeting first, so it can say exactly what goes: documents, patches, and a candidate branch that was never applied.
+let pendingDelete = null, deleteBusy = false;
+const plural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
+function deletionItems(run) {
+  const ws = run.workspace, items = [];
+  const sessions = run.sessions?.length ? `, across ${plural(run.sessions.length + 1, 'session')}` : '';
+  items.push(`The meeting record: the brief, ${plural(run.entries?.length || 0, 'transcript entry', 'transcript entries')}, the votes, the objections, and the final answer${sessions}.`);
+  const docs = run.attachments || [];
+  if (docs.length && run.documents?.state !== 'removed') items.push(`${plural(docs.length, 'attached document')} and ${docs.length === 1 ? 'its' : 'their'} extracted text: ${docs.map(d => escapeHTML(d.name)).join(', ')}.`);
+  const patches = (run.entries || []).filter(e => e.candidate?.artifact).length;
+  if (patches) items.push(`${plural(patches, 'candidate patch file')} saved on the host.`);
+  if (ws?.impl) items.push('<span class="warn">The implementer’s unfinished checkout, kept so the meeting could resume its partial work.</span>');
+  if (ws?.branch && !ws.discarded) items.push(ws.applied
+    ? `The candidate branch <code>${escapeHTML(ws.branch)}</code> in ${escapeHTML(ws.name)}. It was applied into ${escapeHTML(ws.applied.into)}, and that merge stays.`
+    : `<span class="warn">The candidate branch <code>${escapeHTML(ws.branch)}</code> in ${escapeHTML(ws.name)}. It was never applied, so its changes are lost.</span>`);
+  return items;
+}
+async function confirmDelete(id) {
+  let run;
+  try { run = await api(`/api/runs/${encodeURIComponent(id)}`); }
+  catch (error) { toast(error.message); return refreshHistory().catch(() => {}); }
+  if (run.status === 'running') return toast('This meeting is in session. Stop it first, then delete it.');
+  if (run.pin) return toast('This meeting is pinned. Unpin it first, then delete it.');
+  pendingDelete = run.id;
+  const label = runLabel(run);
+  $('delete-prompt').textContent = label.length > 400 ? label.slice(0, 400) + '…' : label;
+  $('delete-items').innerHTML = deletionItems(run).map(item => `<li>${item}</li>`).join('');
+  $('delete-keeps').textContent = `${run.workspace ? `Your working tree in ${run.workspace.name} is not touched. ` : ''}Exports and patches you already downloaded are not affected.`;
+  $('delete-error').textContent = '';
+  setDeleteBusy(false);
+  $('delete-dialog').showModal(); $('delete-cancel').focus();
+}
+function setDeleteBusy(busy) {
+  deleteBusy = busy;
+  $('delete-confirm').disabled = $('delete-cancel').disabled = $('close-delete').disabled = busy;
+  $('delete-confirm').textContent = busy ? 'Deleting…' : 'Delete permanently';
+}
+// Drops a meeting that no longer exists from the page: out of the history, and off the screen if it was the one shown.
+function forgetRun(id) {
+  state.runs = state.runs.filter(r => r.id !== id); view.matches?.delete(id); view.archiveMatches?.delete(id);
+  if (currentRun?.id === id) newDiscussion(); else renderHistory();
+  refreshHistory().catch(() => {});
+}
+$('delete-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const id = pendingDelete; if (!id || deleteBusy) return;
+  setDeleteBusy(true); $('delete-error').textContent = '';
+  try {
+    const result = await api(`/api/runs/${encodeURIComponent(id)}`, 'DELETE');
+    setDeleteBusy(false); $('delete-dialog').close(); forgetRun(id);
+    toast(`Meeting deleted${result.removed?.branch ? `, with its branch ${result.removed.branch}` : ''}.`);
+  } catch (error) { setDeleteBusy(false); $('delete-error').textContent = error.message; }
+});
+$('delete-cancel').onclick = $('close-delete').onclick = () => $('delete-dialog').close();
+$('delete-dialog').addEventListener('cancel', event => { if (deleteBusy) event.preventDefault(); }); // Escape cannot hide a delete in flight
+$('delete-dialog').addEventListener('close', () => { pendingDelete = null; });
+$('delete-run').onclick = () => currentRun && confirmDelete(currentRun.id);
+// Another window or a paired device may have deleted meetings: catch up whenever this tab comes back into view.
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible' || !state.token) return;
+  try { await refreshHistory(); } catch { return; }
+  if (currentRun && currentRun.status !== 'running' && !state.runs.some(r => r.id === currentRun.id)) { newDiscussion(); toast('That meeting was deleted, so it is no longer shown.'); }
+  // A pin changed from another window or device shows on the meeting in view, too.
+  const shown = currentRun && state.runs.find(r => r.id === currentRun.id);
+  if (shown && JSON.stringify(shown.pin || null) !== JSON.stringify(currentRun.pin || null)) { currentRun.pin = shown.pin; renderPinControls(currentRun); }
+  if (shown && (shown.title || null) !== (currentRun.title || null)) { currentRun.title = shown.title; renderNameControls(currentRun); }
+  if (shown && Boolean(shown.archived) !== Boolean(currentRun.archived)) { currentRun.archived = shown.archived; renderRun(currentRun); }
+});
 function markdown(text) {
   // Render a deliberately small Markdown subset; provider HTML is always escaped.
   return text.split(/(```[\s\S]*?```)/g).map(part => {
@@ -390,6 +881,9 @@ function renderRun(run) {
   $('resume').classList.toggle('hidden', !stopped || needsLimits); $('resume').disabled = false;
   $('resume').textContent = run.phase === 'check' ? 'Retry candidate checks' : run.phase === 'draft' && run.stopReason ? 'Resume candidate preparation' : `Resume meeting (up to ${remaining} call${remaining === 1 ? '' : 's'})`;
   $('export').href = `/api/runs/${run.id}/export`;
+  $('delete-run').classList.toggle('hidden', run.status === 'running');
+  renderPinControls(run);
+  renderNameControls(run);
   const ws = run.workspace;
   const docs = run.attachments || [], docState = run.documents?.state;
   $('run-documents').classList.toggle('hidden', !docs.length);
@@ -434,6 +928,7 @@ function renderRun(run) {
   if (stopped && (changedSession || !wasShowingLimits)) fillAdjustForm(run);
   if (changedSession) { $('reconvene-max-calls').value = ''; $('reconvene-duration').value = Math.ceil((run.budget?.maxDurationSeconds || 3600) / 60); }
   $('say-note').textContent = run.pendingOwner?.length ? `${run.pendingOwner.length} message${run.pendingOwner.length === 1 ? '' : 's'} queued for the next turn.` : 'Delivered at the next turn. The next member must address you.';
+  renderArchiveControls(run); // last: an archived meeting hides resume and reconvene shown above
   updateEstimate();
 }
 // The adjust panel starts from what the meeting is running with now, so submitting it unchanged changes nothing.
@@ -482,7 +977,9 @@ function watchRun(run) {
   if (run.status !== 'running') return;
   events = new EventSource(`/api/runs/${run.id}/events`);
   events.onmessage = event => {
-    const value = JSON.parse(event.data), wasRunning = currentRun?.status === 'running'; renderRun(value);
+    const parsed = JSON.parse(event.data);
+    if (parsed.deleted) { events.close(); forgetRun(parsed.id); return toast('That meeting was deleted, so it is no longer shown.'); }
+    const value = parsed, wasRunning = currentRun?.status === 'running'; renderRun(value);
     // A run watched to completion lands on its answer; a failure stays on the transcript where the error is open.
     if (wasRunning && ['complete', 'limited'].includes(value.status)) selectTab('answer');
     if (value.status !== 'running') { events.close(); refreshHistory().catch(error => toast(error.message)); }
@@ -491,7 +988,7 @@ function watchRun(run) {
 }
 async function loadRun(id) {
   try { const run = await api(`/api/runs/${id}`); showPage('workspace'); watchRun(run); renderHistory(); $('discussion').scrollIntoView({ behavior: 'smooth', block: 'start' }); }
-  catch (error) { toast(error.message); }
+  catch (error) { toast(error.message); refreshHistory().catch(() => {}); } // it may have been deleted elsewhere
 }
 async function startRun(demo = false) {
   if (!demo && !$('prompt').value.trim()) { $('prompt').focus(); return toast('Describe what you want your council to work on.'); }
@@ -561,7 +1058,7 @@ $('delete-connection').onclick = async () => {
 };
 $('provider-dialog').addEventListener('close', () => { $('provider-key').value = ''; });
 $('provider-type').onchange = formType; $('provider-preset').onchange = applyPreset; $('close-dialog').onclick = () => $('provider-dialog').close();
-$('connections-nav').onclick = $('manage-connections').onclick = () => showPage('connections'); $('workspace-nav').onclick = () => showPage('workspace'); $('security-nav').onclick = () => showPage('security');
+$('connections-nav').onclick = $('manage-connections').onclick = () => showPage('connections'); $('workspace-nav').onclick = () => showPage('workspace'); $('security-nav').onclick = () => showPage('security'); $('archive-nav').onclick = () => showPage('archive');
 // ---------- security page ----------
 let securityEvents;
 const scoreClass = s => s === null || s === undefined ? '' : s <= 30 ? 'ok' : s <= 60 ? 'warn' : 'bad';
