@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { statfs as fsStatfs } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join, resolve, sep } from 'node:path';
@@ -12,6 +13,9 @@ import { SecurityJobs, listPresets, memberProfiles, validateImage, vendoredAgent
 import { Access } from './lib/access.mjs';
 import { Attachments, MAX_FILE_BYTES, MAX_FILES, ACCEPTED } from './lib/attachments.mjs';
 import { assertCoversImplementer } from './lib/budget.mjs';
+import { expiring, counted, HISTORY_LIMIT } from './public/meeting-state.js';
+import { searchRuns } from './lib/search.mjs';
+import { measureStorage, capacity, POLICY } from './lib/capacity.mjs';
 import { cloneRepo, repoRoot } from './lib/repos.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
@@ -21,12 +25,39 @@ const defaults = [
 ];
 const demoPool = () => [{ ...defaults[0], id: 'demo-builder', name: 'Demo builder' }, { ...defaults[1], id: 'demo-reviewer', name: 'Demo reviewer' }];
 
-export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process.env.MESH_DATA_DIR || join(root, 'data'), providerCall, detect = detectClis, addresses, workspaceRoot = process.env.OVERRULE_WORKSPACE_ROOT || process.env.MESH_WORKSPACE_ROOT || '', canary = codexCanary, checkRunner, measure = (level, cwd) => measureLevel(level, cwd, { dataDir: directory }), securityJobs, documentRunner } = {}) {
+export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process.env.MESH_DATA_DIR || join(root, 'data'), providerCall, detect = detectClis, addresses, workspaceRoot = process.env.OVERRULE_WORKSPACE_ROOT || process.env.MESH_WORKSPACE_ROOT || '', canary = codexCanary, checkRunner, measure = (level, cwd) => measureLevel(level, cwd, { dataDir: directory }), securityJobs, documentRunner, statfs = fsStatfs } = {}) {
   const store = new Store(directory);
   const access = new Access(store, addresses);
   let providers = store.read('providers.json', defaults.map(p => ({ ...p })));
   const attachments = new Attachments(directory, { run: documentRunner });
   const mesh = new Mesh(store, providerCall, { runChecks: checkRunner, attachments });
+  // Settings the owner changes from the gear menu, saved in data/settings.json. The history limit is how many stopped meetings
+  // the list keeps, not counting pinned or archived ones: a number, or "max" for as many as the disk safely holds. An older file's
+  // null ("keep every meeting") means "max" now, which is what it always had to mean on a disk of finite size.
+  let settings = { historyLimit: HISTORY_LIMIT, ...store.read('settings.json', {}) };
+  try { settings.historyLimit = validateHistoryLimit(settings.historyLimit); } catch { settings.historyLimit = HISTORY_LIMIT; }
+  const applyLimit = () => { mesh.historyLimit = settings.historyLimit === 'max' ? Infinity : settings.historyLimit; };
+  applyLimit();
+  // What the disk has room for is measured before every meeting starts, and otherwise at most every half minute, so listing the
+  // history stays cheap on a long one. The limit in force is the smaller of the setting and that room.
+  let measurement = { at: 0, value: null };
+  async function storageNow(force = false) {
+    if (!force && measurement.value && Date.now() - measurement.at < 30_000) return measurement.value;
+    const measured = await measureStorage(directory, mesh.runs, { statfs });
+    const fits = capacity(measured, mesh.runs.filter(counted).length);
+    mesh.capacity = fits ? fits.atNextStart : null;
+    measurement = { at: Date.now(), value: { ...measured, capacity: fits } };
+    return measurement.value;
+  }
+  const finite = limit => Number.isFinite(limit) ? limit : null; // JSON has no Infinity: null means no limit applies
+  // effectiveLimit is what the next start applies (one slot goes to the meeting starting); room is what people are shown: how many
+  // meetings the list can hold, null when free space is unknown.
+  const publicSettings = () => ({ historyLimit: settings.historyLimit, effectiveLimit: finite(mesh.effectiveLimit()), room: measurement.value?.capacity?.room ?? null });
+  // The settings, with how the room was worked out, so the dialog can show its arithmetic rather than a bare number.
+  async function settingsView(force) {
+    const { meetingsBytes, freeBytes, diskBytes, capacity: fits } = await storageNow(force);
+    return { ...publicSettings(), storage: { meetingsBytes, freeBytes, diskBytes }, capacity: fits, policy: POLICY };
+  }
   // Documents: a meeting that the last shutdown interrupted keeps only its extracted text; folders of finished or forgotten meetings go.
   const documentsReady = (async () => {
     const holding = mesh.runs.filter(r => r.attachments?.length && r.documents?.state !== 'removed');
@@ -147,7 +178,7 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
         if (!local) return json(res, 403, { error: 'Rotate the pairing code through localhost on the host machine.' });
         return json(res, 200, { pairingCode: access.rotate(), urls: access.urls(port), rotatedAt: access.rotatedAt });
       }
-      if (req.method === 'GET' && url.pathname === '/api/bootstrap') return json(res, 200, { token: csrf, providers: providers.map(publicProvider), types: TYPES, presets: PRESETS, clis: await currentClis(), runs: summaries(mesh.runs), local, lanUrls: access.urls(port) });
+      if (req.method === 'GET' && url.pathname === '/api/bootstrap') { await storageNow(); return json(res, 200, { token: csrf, providers: providers.map(publicProvider), types: TYPES, presets: PRESETS, clis: await currentClis(), runs: summaries(mesh.runs, mesh.effectiveLimit()), settings: publicSettings(), local, lanUrls: access.urls(port) }); }
       if (req.method === 'POST' && url.pathname === '/api/clis/check') return json(res, 200, await refreshClis());
       if (req.method === 'GET' && url.pathname === '/api/workspace') return json(res, 200, { recent: recentList(), browseStart: workspaceRoot || '', local, levels: LEVELS, maxScore, agentsec: Boolean(security.binary || agentsecBinary()) });
       if (req.method === 'POST' && url.pathname === '/api/workspace/budget') {
@@ -260,7 +291,20 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
         providers = providers.map(p => p.id === old.id ? provider : p); store.write('providers.json', providers);
         return json(res, 200, publicProvider(provider));
       }
-      if (req.method === 'GET' && url.pathname === '/api/runs') return json(res, 200, summaries(mesh.runs));
+      // ?q= searches every meeting, archived ones included, and says where each match was found. Without it, every meeting is listed.
+      if (req.method === 'GET' && url.pathname === '/api/runs') { await storageNow(); return json(res, 200, summaries(mesh.runs, mesh.effectiveLimit(), searchRuns(mesh.runs, url.searchParams.get('q')))); }
+      if (req.method === 'GET' && url.pathname === '/api/settings') return json(res, 200, await settingsView(true));
+      if (req.method === 'PUT' && url.pathname === '/api/settings') {
+        const input = await body(req);
+        if (Object.hasOwn(input, 'historyLimit')) {
+          // A number is checked against what the disk has room for now; "max" follows the free space from here on.
+          const { capacity: fits } = await storageNow(true);
+          settings.historyLimit = validateHistoryLimit(input.historyLimit, fits?.room ?? null);
+        }
+        store.write('settings.json', settings); applyLimit();
+        // How many meetings the next meeting to start will remove under the new limit, so the owner hears it now.
+        return json(res, 200, { ...publicSettings(), expiring: expiring(mesh.runs, mesh.effectiveLimit()).size });
+      }
       if (req.method === 'POST' && url.pathname === '/api/runs') {
         const input = await body(req);
         const demo = input.demo === true;
@@ -275,13 +319,29 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
         if (options.workspace) rememberWorkspace(options.workspace.path);
         // Staged documents move under this meeting; if the meeting cannot start they go back to the composer.
         if (!demo && Array.isArray(input.attachmentIds) && input.attachmentIds.length) { options.id = randomUUID(); options.attachments = await attachments.claim(input.attachmentIds, options.id); }
-        try { return json(res, 201, mesh.create(options, demo)); }
+        await storageNow(true); // the room this meeting leaves, measured now: pruning below keeps the disk's reserve free
+        let run;
+        try { run = mesh.create(options, demo); }
         catch (error) { if (options.attachments?.length) await attachments.unclaim(options.id, options.attachments); throw error; }
+        // The meeting is already running; answer once the meetings it pushed out of the history are gone, so the list the page
+        // reloads next is current.
+        await mesh.pruning;
+        return json(res, 201, run);
       }
-      const match = url.pathname.match(/^\/api\/runs\/([a-zA-Z0-9-]+)(?:\/(events|cancel|pause|resume|reconvene|say|export|apply|discard|patch|documents))?$/);
+      const match = url.pathname.match(/^\/api\/runs\/([a-zA-Z0-9-]+)(?:\/(events|cancel|pause|resume|reconvene|say|export|apply|discard|patch|documents|pin|title|archive))?$/);
       if (match) {
         const run = mesh.runs.find(r => r.id === match[1]);
         if (!run) return json(res, 404, { error: 'Discussion not found.' });
+        // Permanent: the record, its documents, patches, checkouts, and candidate branch. A meeting in session must be stopped first.
+        if (req.method === 'DELETE' && !match[2]) return json(res, 200, await mesh.remove(run));
+        // Pinned meetings stay at the top of the history and are never pruned. PUT pins, or edits tags and project; DELETE unpins.
+        // The name the history shows. An empty name clears it, and the brief shows again; the brief itself never changes.
+        if (req.method === 'PUT' && match[2] === 'title') return json(res, 200, mesh.rename(run, (await body(req)).title));
+        // Archived meetings are kept in full but leave the history list for the Archive, and are never pruned.
+        if (req.method === 'PUT' && match[2] === 'archive') return json(res, 200, mesh.archive(run));
+        if (req.method === 'DELETE' && match[2] === 'archive') return json(res, 200, mesh.unarchive(run));
+        if (req.method === 'PUT' && match[2] === 'pin') return json(res, 200, { pin: mesh.pin(run, await body(req)) });
+        if (req.method === 'DELETE' && match[2] === 'pin') return json(res, 200, mesh.unpin(run));
         if (req.method === 'POST' && match[2] === 'cancel') { mesh.cancel(run.id); return json(res, 200, { ok: true }); }
         if (req.method === 'POST' && match[2] === 'pause') { mesh.pause(run); return json(res, 200, { ok: true, pausing: true }); }
         if (req.method === 'DELETE' && match[2] === 'documents') {
@@ -298,6 +358,7 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
           const text = String(input.text || '').trim(), cycles = Number(input.cycles ?? 2);
           if (match[2] === 'reconvene' && (!text || text.length > 4000)) throw new Error('Tell the council what to take up next, in 1 to 4,000 characters.');
           if (match[2] === 'reconvene' && (!Number.isInteger(cycles) || cycles < 1 || cycles > 4)) throw new Error('Choose 1–4 cycles for the new session.');
+          if (run.archived) throw new Error(`This meeting is archived. Unarchive it before ${match[2] === 'resume' ? 'resuming' : 'reconvening'} it.`);
           const pool = run.demo ? demoPool() : providers;
           const participants = run.participants.map(p => pool.find(x => x.id === p.id));
           if (participants.some(p => !p)) throw new Error('A connection used by this discussion no longer exists. Start a new discussion instead.');
@@ -334,10 +395,10 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
         }
         if (req.method === 'GET' && match[2] === 'events') {
           res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
-          const send = value => { if (!res.destroyed) { if (res.writableLength > 2_000_000) return res.destroy(); res.write(`data: ${JSON.stringify(value)}\n\n`); } };
+          const send = value => { if (!res.destroyed && !res.writableEnded) { if (res.writableLength > 2_000_000) return res.destroy(); res.write(`data: ${JSON.stringify(value)}\n\n`); if (value.deleted) res.end(); } };
           if (!mesh.listeners.has(run.id)) mesh.listeners.set(run.id, new Set());
           mesh.listeners.get(run.id).add(send); send(run);
-          const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 15000);
+          const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n'); }, 15000);
           res.on('close', () => { clearInterval(heartbeat); mesh.listeners.get(run.id)?.delete(send); if (!mesh.listeners.get(run.id)?.size) mesh.listeners.delete(run.id); });
           return;
         }
@@ -359,7 +420,28 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
   return { server, mesh, store, access };
 }
 
-function summaries(runs) { return runs.map(({ id, prompt, status, createdAt, demo, participants, workspace }) => ({ id, prompt: prompt.slice(0, 140), status, createdAt, demo, count: participants.length, workspace: workspace ? { name: workspace.name, level: workspace.level } : null })); }
+// "expiring" marks the meetings the next new meeting would prune, so the history can say so before it happens.
+// "unappliedBranch" names a candidate branch that removing the meeting would delete with its changes, so that warning can be given.
+// "pruneBlocked" says why a meeting past the limit is still here. With a search, only matches are listed, each with where it matched.
+function summaries(runs, limit, matches = null) {
+  const leaving = expiring(runs, limit);
+  return runs.filter(run => !matches || matches.has(run.id)).map(({ id, prompt, title, status, createdAt, demo, participants, workspace, pin, archived, pruneBlocked }) => ({
+    id, prompt: prompt.slice(0, 140), title: title || null, status, createdAt, demo, count: participants.length,
+    workspace: workspace ? { name: workspace.name, level: workspace.level, unappliedBranch: workspace.branch && !workspace.applied && !workspace.discarded ? workspace.branch : null } : null,
+    pin: pin || null, archived: archived || null, expiring: leaving.has(id), pruneBlocked: pruneBlocked || null,
+    ...(matches ? { match: matches.get(id) } : {}),
+  }));
+}
+
+// A whole number of meetings, at least one and no more than the disk has room for when that is known, or "max" for as many as
+// the disk safely holds. null, from an older settings file or client, meant "keep every meeting" and is read as "max".
+export function validateHistoryLimit(value, room = null) {
+  if (value === null || value === 'max') return 'max';
+  const limit = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Keep at least one meeting: enter a whole number, or choose as many as the disk safely holds.');
+  if (room !== null && limit > room) throw new Error(`This disk has safe room for about ${room.toLocaleString('en-US')} meetings. Choose up to that, or choose as many as the disk safely holds.`);
+  return limit;
+}
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const port = Number(process.env.PORT || 4310);

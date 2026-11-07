@@ -73,3 +73,24 @@ export function assessResult(run) {
   const verification = !writeWorkspace || !(run.workspace.checks || []).length ? 'No independent automated checks; approval records model agreement.' : !candidateReady(run, candidate) ? 'Configured checks have not all finished.' : checks.some(c => c.code !== 0) ? 'Review the failing checks before applying.' : 'All configured checks passed on the recorded commit.';
   return { code, label, verification, dissent, stopReason: run.stopReason || null, votes, voters: voters.length, missingBallots, ballots, draft, candidate, openIssues };
 }
+
+// History keeps the newest `limit` stopped meetings that are neither pinned nor archived (30 unless the owner changes it in
+// Settings; Infinity, or null, removes none). Pinned, archived, and running meetings never count and are never pruned. The ids returned
+// are the ones the next new meeting would push out; the server prunes exactly these, and the interface uses the same rule to warn.
+export const HISTORY_LIMIT = 30;
+export const counted = run => run.status !== 'running' && !run.pin && !run.archived;
+export function expiring(runs, limit = HISTORY_LIMIT) {
+  if (limit === null || limit === Infinity) return new Set();
+  return new Set(runs.filter(counted).slice(limit).map(r => r.id));
+}
+
+// A search query is words and "quoted phrases", compared without case. Shared so the server matches and the browser highlights
+// exactly the same terms.
+export function parseQuery(text) {
+  const terms = [];
+  for (const match of String(text ?? '').slice(0, 500).matchAll(/"([^"]*)"|(\S+)/g)) {
+    const term = (match[1] ?? match[2]).replace(/^"+|"+$/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (term && !terms.includes(term)) terms.push(term);
+  }
+  return terms.slice(0, 12);
+}
