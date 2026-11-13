@@ -1,5 +1,7 @@
 import { assessResult, callsUsed, elapsedBudget, estimateCalls, citationEvidence, issueStatus, expiring, HISTORY_LIMIT, parseQuery } from './meeting-state.js';
 import { PLAYBOOKS, buildPlaybook } from './playbooks.js';
+import { findModel } from './model-match.js';
+import { COUNCIL_GROUPS, GROUP_IDS, MAX_SEATS, describeGroup, describeCouncil, snapshotFromRun, keep, changesFrom } from './councils.js';
 
 const $ = id => document.getElementById(id);
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -9,12 +11,13 @@ const colors = { 'codex-cli': 'mint', 'claude-cli': 'peach', openai: 'mint', ant
 function toast(message) { $('toast').textContent = message; $('toast').classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').classList.add('hidden'), 6000); }
 // The draft lives in this browser only, so an expired pairing or a server restart never costs a half-written brief.
 const DRAFT_KEY = 'mesh-draft';
-function saveDraft() { try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ prompt: $('prompt').value, rounds: $('rounds').value, revisions: $('revisions').value, research: $('research').checked, deepResearch: $('deep-research').checked, maxCalls: $('max-calls').value, duration: $('duration').value, synthesizer: $('synthesizer').value, selected: [...state.selected], maxTokens: $('max-tokens').value, timeout: $('timeout').value, workspacePath: $('workspace-path').value, workspaceChecks: $('workspace-checks').value })); } catch {} }
+function saveDraft() { try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ prompt: $('prompt').value, rounds: $('rounds').value, revisions: $('revisions').value, research: $('research').checked, deepResearch: $('deep-research').checked, maxCalls: $('max-calls').value, duration: $('duration').value, synthesizer: $('synthesizer').value, selected: [...state.selected], maxTokens: $('max-tokens').value, timeout: $('timeout').value, workspacePath: $('workspace-path').value, workspaceChecks: $('workspace-checks').value, neutralDrafter: $('neutral-drafter').checked, council: state.council || null })); } catch {} renderCouncils(); }
 function readDraft() { try { return JSON.parse(localStorage.getItem(DRAFT_KEY)) || {}; } catch { return {}; } }
 async function api(path, method = 'GET', data, retried = false, signal) {
   const response = await fetch(path, { method, signal, headers: { 'Content-Type': 'application/json', 'X-Mesh-Token': state.token || '' }, ...(data !== undefined ? { body: JSON.stringify(data) } : {}) });
   if (response.status === 401) { if ($('prompt').value.trim()) saveDraft(); location.assign('/'); throw new Error('Pair this device again to continue.'); }
-  const result = await response.json().catch(() => ({}));
+  // A request cancelled while its body was arriving is a cancellation, not an empty answer: callers must not act on it.
+  const result = await response.json().catch(error => { if (signal?.aborted) throw error; return {}; });
   if (response.status === 403 && result.code === 'stale-token' && !retried) {
     // The server restarted and issued a new mutation token: pick it up and retry once instead of failing every save.
     const fresh = await fetch('/api/bootstrap');
@@ -48,9 +51,12 @@ function showPage(page) {
 function renderProviders() {
   state.selected = new Set([...state.selected].filter(id => state.providers.some(p => p.id === id)));
   $('connection-count').textContent = state.providers.length;
+  // A development override sends every built-in API connection somewhere else; say so wherever connections are managed.
+  const override = state.providerOverride;
+  $('provider-override').textContent = !override ? '' : override.error ? `${override.error} API connections will fail until ${override.env} is fixed or unset.` : `${override.env} is set: every built-in API connection goes to ${override.url}, not to its provider.`;
   $('participants').innerHTML = state.providers.length ? state.providers.map(p => `<label class="participant ${state.selected.has(p.id) ? 'selected' : ''}" title="${escapeHTML(status(p))}"><input type="checkbox" value="${escapeHTML(p.id)}" ${state.selected.has(p.id) ? 'checked' : ''}>${badge(p)}<span class="participant-info"><strong><i class="state-dot ${readiness(p).level}"></i>${escapeHTML(p.name)}</strong><small>${escapeHTML(p.model || 'CLI default model')}</small></span><span class="provider-status ${available(p) ? 'ready' : ''}">${state.types[p.type]?.cli ? 'Local' : 'API'}</span></label>`).join('') : '<p class="empty-copy">Add two connections to assemble your council.</p>';
   $('participants').querySelectorAll('input').forEach(input => input.addEventListener('change', () => {
-    if (input.checked && state.selected.size >= 6) { input.checked = false; return toast('Choose up to six participants.'); }
+    if (input.checked && state.selected.size >= MAX_SEATS) { input.checked = false; return toast(`A meeting seats up to ${MAX_SEATS} members.`); }
     input.checked ? state.selected.add(input.value) : state.selected.delete(input.value); renderProviders(); saveDraft();
   }));
   const previousEditor = $('synthesizer').value;
@@ -65,6 +71,8 @@ function renderProviders() {
     catch (error) { toast(error.message); button.disabled = false; button.textContent = 'Check sign-in'; }
   });
   updateEstimate(); drawMesh();
+  // The council line names seats by their connections, so it is redrawn whenever they are.
+  renderCouncils();
 }
 // Document text rides in every prompt, so it multiplies with the number of calls. Rough: four characters to a token.
 function documentNote() {
@@ -121,7 +129,8 @@ function renderAttachments() {
 }
 async function uploadDocument(file, retried = false) {
   const response = await fetch('/api/attachments', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name), 'X-Mesh-Token': state.token || '' }, body: file });
-  const result = await response.json().catch(() => ({}));
+  // A request cancelled while its body was arriving is a cancellation, not an empty answer: callers must not act on it.
+  const result = await response.json().catch(error => { if (signal?.aborted) throw error; return {}; });
   if (response.status === 403 && result.code === 'stale-token' && !retried) { const fresh = await fetch('/api/bootstrap'); if (fresh.ok) { state.token = (await fresh.json()).token; return uploadDocument(file, true); } }
   if (response.status === 401) throw new Error('Pair this device again, then attach the file.');
   if (!response.ok) throw new Error(result.error || `${file.name} could not be uploaded.`);
@@ -864,7 +873,8 @@ function renderRun(run) {
   currentRun = run;
   $('discussion').classList.remove('hidden'); $('workspace').classList.add('run-view'); $('page-crumb').textContent = 'Discussion';
   const meeting = isMeeting(run);
-  $('run-label').textContent = run.demo ? 'Scripted demo. No model calls.' : '';
+  $('run-label').textContent = run.demo ? 'Scripted demo. No model calls.' : run.council ? `Council: ${run.council.name}${run.council.changed?.length ? ` (changed: ${run.council.changed.map(groupLabel).join(', ')})` : ''}` : '';
+  $('save-council-run').classList.toggle('hidden', Boolean(run.demo));
   const titles = { opening: 'Members are writing their positions.', floor: 'The council has the floor.', draft: 'The drafter is writing the candidate.', check: 'Checking the candidate before voting.', ratify: 'Members are voting on the candidate.', propose: 'Independent ideas are taking shape.', review: 'The council is comparing notes.', synthesize: 'Bringing the best ideas together.' };
   const result = assessResult(run);
   $('run-title').textContent = run.status === 'complete' ? (meeting ? result.label : 'The discussion is complete.') : run.status === 'limited' ? 'Session limit reached.' : run.status === 'paused' ? 'Meeting paused.' : run.pauseRequested ? 'Pausing after this step.' : run.status === 'running' ? (titles[run.phase] || 'The council is thinking.') : `${meeting ? 'Meeting' : 'Discussion'} ${run.status}.`;
@@ -995,7 +1005,8 @@ async function startRun(demo = false) {
   if (!demo && (state.attachments || []).some(a => a.uploading)) return toast('Wait for the documents to finish uploading.');
   $('start').disabled = true; $('demo').disabled = true;
   try {
-    const run = await api('/api/runs', 'POST', { prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, neutralDrafter: !demo && Boolean($('neutral-drafter')?.checked), cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), revisions: Number($('revisions')?.value ?? 1), research: !demo && $('research').checked, deepResearch: !demo && $('deep-research').checked, maxCalls: demo || !$('max-calls').value ? undefined : Number($('max-calls').value), maxDurationSeconds: demo ? 3600 : Number($('duration').value) * 60, demo, workspace: demo ? undefined : workspacePayload(), attachmentIds: demo ? undefined : (state.attachments || []).filter(a => a.id).map(a => a.id) });
+    const council = !demo && activeCouncil();
+    const run = await api('/api/runs', 'POST', { ...(council ? { council: { id: council.id, changed: changesFrom(council, formSnapshot()) } } : {}), prompt: demo ? '' : $('prompt').value.trim(), participantIds: [...state.selected], drafterId: $('synthesizer').value, neutralDrafter: !demo && Boolean($('neutral-drafter')?.checked), cycles: Number($('rounds').value), maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value), revisions: Number($('revisions')?.value ?? 1), research: !demo && $('research').checked, deepResearch: !demo && $('deep-research').checked, maxCalls: demo || !$('max-calls').value ? undefined : Number($('max-calls').value), maxDurationSeconds: demo ? 3600 : Number($('duration').value) * 60, demo, workspace: demo ? undefined : workspacePayload(), attachmentIds: demo ? undefined : (state.attachments || []).filter(a => a.id).map(a => a.id) });
     if (!demo && run.attachments?.length) { state.attachments = []; renderAttachments(); }
     showPage('workspace'); watchRun(run); await refreshHistory(); $('discussion').scrollIntoView({ behavior: 'smooth', block: 'start' });
     if (!demo && run.workspace) api('/api/workspace').then(config => { state.workspaceConfig = config; workspaceSetup(); }).catch(() => {}); // the workspace just became a recent
@@ -1007,34 +1018,241 @@ function newDiscussion() {
   if (currentRun && $('prompt').value.trim() === currentRun.prompt) $('prompt').value = '';
   currentRun = null; $('workspace').classList.remove('run-view'); $('discussion').classList.add('hidden'); $('prompt').dispatchEvent(new Event('input')); showPage('workspace'); updateEstimate(); renderHistory(); window.scrollTo({ top: 0, behavior: 'smooth' }); $('prompt').focus();
 }
-// Model suggestions come from the Codex catalog the CLI publishes and the Claude list the app knows; free text is always allowed.
-function modelOptions(type) {
-  if (type === 'codex-cli') return state.clis.codex?.models || [];
-  if (type === 'claude-cli' || type === 'anthropic') return (state.clis.claude?.models || []).filter(m => type === 'claude-cli' || m.id.startsWith('claude-'));
-  return [];
+// ---- Saved councils: named seats plus whichever settings their owner chose to keep, stored on the host. ----
+const groupLabel = id => id === 'seats' ? 'seats' : (COUNCIL_GROUPS.find(g => g.id === id)?.label || id).toLowerCase();
+const seatName = id => state.providers.find(p => p.id === id)?.name || 'a removed connection';
+const activeCouncil = () => (state.councils || []).find(c => c.id === state.council) || null;
+// The form as a council would keep it, in the same shape the server stores, so the two compare directly.
+function formSnapshot() {
+  return {
+    seats: [...state.selected],
+    settings: {
+      drafter: { drafterId: $('synthesizer').value, neutralDrafter: $('neutral-drafter').checked },
+      cycles: Number($('rounds').value), revisions: Number($('revisions').value),
+      research: { research: $('research').checked || $('deep-research').checked, deepResearch: $('deep-research').checked },
+      limits: { maxCalls: $('max-calls').value ? Number($('max-calls').value) : null, maxDurationSeconds: Number($('duration').value) * 60, maxTokens: Number($('max-tokens').value), timeoutSeconds: Number($('timeout').value) },
+    },
+  };
+}
+// The selector, and a line saying what the chosen council keeps and whether the form has moved away from it since.
+function renderCouncils() {
+  const list = [...(state.councils || [])].sort((a, b) => a.name.localeCompare(b.name));
+  if (state.council && !activeCouncil()) state.council = null;
+  $('council-select').innerHTML = `<option value="">None: choose seats below</option>${list.map(c => `<option value="${escapeHTML(c.id)}">${escapeHTML(c.name)}${c.incomplete ? ' (needs seats)' : ''}</option>`).join('')}`;
+  $('council-select').value = state.council || '';
+  const council = activeCouncil();
+  $('council-delete').classList.toggle('hidden', !council);
+  let note = '', warn = false;
+  if (council) {
+    const changed = changesFrom(council, formSnapshot());
+    note = `Keeps: ${describeCouncil(council, seatName)}.`;
+    if (council.incomplete) { note += ` Only ${council.seats.length} of its seats ${council.seats.length === 1 ? 'is' : 'are'} still a saved connection; seat at least one more.`; warn = true; }
+    else if (changed.length) { note += ` Changed since you picked it: ${changed.map(groupLabel).join(', ')}. Save as council to keep the change.`; warn = true; }
+  } else note = list.length ? `${list.length} saved ${list.length === 1 ? 'council' : 'councils'}. Pick one to seat it in one step, or save the seats below as a new one.` : 'Save the seats and settings below as a council to bring them back in one step later.';
+  // The purpose, when there is one, on its own line above what the council keeps.
+  $('council-note').innerHTML = `${council?.purpose ? `<span class="council-purpose">${escapeHTML(council.purpose)}</span>` : ''}${escapeHTML(note)}`; $('council-note').classList.toggle('warn', warn);
+}
+// Seats the council and applies the groups it kept; what it did not keep stays as the form has it.
+function applyCouncil(council) {
+  state.selected = new Set(council.seats.filter(id => state.providers.some(p => p.id === id)).slice(0, MAX_SEATS));
+  renderProviders();
+  const kept = council.settings || {};
+  if (kept.drafter && state.selected.has(kept.drafter.drafterId)) { $('synthesizer').value = kept.drafter.drafterId; $('neutral-drafter').checked = kept.drafter.neutralDrafter; }
+  if (kept.cycles) $('rounds').value = String(kept.cycles);
+  if (kept.revisions !== undefined) $('revisions').value = String(kept.revisions);
+  if (kept.research) { $('research').checked = kept.research.research; $('deep-research').checked = kept.research.deepResearch; }
+  if (kept.limits) { $('max-calls').value = kept.limits.maxCalls ?? ''; $('duration').value = Math.round(kept.limits.maxDurationSeconds / 60); $('max-tokens').value = kept.limits.maxTokens; $('timeout').value = kept.limits.timeoutSeconds; }
+  state.council = council.id;
+  updateEstimate(); saveDraft();
+}
+$('council-select').onchange = () => {
+  const council = (state.councils || []).find(c => c.id === $('council-select').value);
+  if (council) applyCouncil(council); else { state.council = null; saveDraft(); }
+};
+$('council-delete').onclick = async () => {
+  const council = activeCouncil(); if (!council) return;
+  if (!(await confirmAction({ title: `Delete the council “${escapeHTML(council.name)}”?`, body: '<p>Its connections stay saved, and meetings it started keep its name on their record. The seats now chosen stay chosen.</p>', ok: 'Delete council' }))) return;
+  try { await api(`/api/councils/${council.id}`, 'DELETE'); state.councils = state.councils.filter(c => c.id !== council.id); state.council = null; saveDraft(); toast(`Deleted the council “${council.name}”.`); }
+  catch (error) { toast(error.message); }
+};
+$('neutral-drafter').onchange = saveDraft;
+
+// The save dialog: from the form, or from a meeting as it last ran. The owner ticks what the council keeps.
+let councilSource = null;
+function openCouncilDialog(source) {
+  councilSource = source;
+  const snapshot = source.snapshot;
+  const seats = snapshot.seats.filter(id => state.providers.some(p => p.id === id));
+  const gone = snapshot.seats.length - seats.length;
+  const editing = source.from === 'form' ? activeCouncil() : null;
+  councilSource.editing = editing; councilSource.seats = seats;
+  $('council-title').textContent = editing ? `Save council` : 'Save as council';
+  $('council-source').textContent = source.from === 'run'
+    ? `From the meeting “${(source.run.title || source.run.prompt || '').replace(/\s+/g, ' ').slice(0, 60)}” as it last ran.${gone ? ` ${gone} of its members ${gone === 1 ? 'is' : 'are'} no longer a saved connection and ${gone === 1 ? 'is' : 'are'} left out.` : ''}`
+    : 'From the seats and settings now in this form.';
+  $('council-name').value = editing?.name || (source.from === 'run' ? source.run.council?.name || '' : '');
+  $('council-purpose').value = editing?.purpose || '';
+  $('council-names').innerHTML = (state.councils || []).map(c => `<option value="${escapeHTML(c.name)}"></option>`).join('');
+  const drafterGone = !seats.includes(snapshot.settings.drafter.drafterId);
+  $('council-groups').innerHTML = `<label class="check-label"><input type="checkbox" checked disabled><span><strong>Seats</strong>: ${escapeHTML(seats.map(seatName).join(', ') || 'none')} <small>(always kept)</small></span></label>` + COUNCIL_GROUPS.map(g => {
+    const unavailable = g.id === 'drafter' && drafterGone;
+    const checked = !unavailable && (editing ? g.id in (editing.settings || {}) : true);
+    return `<label class="check-label"><input type="checkbox" data-group="${g.id}" ${checked ? 'checked' : ''} ${unavailable ? 'disabled' : ''}><span><strong>${escapeHTML(g.label)}</strong>: ${escapeHTML(unavailable ? 'its drafter is no longer a saved connection' : describeGroup(g.id, snapshot.settings[g.id], seatName))}</span></label>`;
+  }).join('');
+  $('council-error').textContent = '';
+  $('council-rename').checked = false;
+  councilNameChanged();
+  $('council-dialog').showModal(); $('council-name').focus();
+}
+// Saving under a name in use replaces that council, which the dialog says before it happens. Changing the name of the council being
+// edited saves a new one beside it, unless the owner ticks Rename.
+function councilNameChanged() {
+  const name = $('council-name').value.replace(/\s+/g, ' ').trim().toLowerCase(), editing = councilSource?.editing;
+  const renaming = Boolean(editing && name && name !== editing.name.toLowerCase());
+  $('council-rename-label').classList.toggle('hidden', !renaming);
+  $('council-rename-text').textContent = renaming ? `Rename “${editing.name}” instead of saving a new council beside it` : '';
+  const other = (state.councils || []).find(c => c.name.toLowerCase() === name && !(renaming && $('council-rename').checked && c.id === editing.id));
+  const replacing = other && !(editing && other.id === editing.id);
+  $('council-replace').textContent = replacing ? `Saving replaces the council “${other.name}” (${describeCouncil(other, seatName)}).` : '';
+  $('council-replace').classList.toggle('hidden', !replacing);
+  $('council-submit').textContent = other ? (editing && other.id === editing.id ? 'Save changes' : 'Replace council') : renaming && $('council-rename').checked ? 'Rename and save' : 'Save council';
+}
+$('council-name').addEventListener('input', councilNameChanged); $('council-rename').addEventListener('change', councilNameChanged);
+$('council-save').onclick = () => openCouncilDialog({ from: 'form', snapshot: formSnapshot() });
+$('save-council-run').onclick = () => currentRun && openCouncilDialog({ from: 'run', run: currentRun, snapshot: snapshotFromRun(currentRun) });
+$('close-council').onclick = $('council-cancel').onclick = () => $('council-dialog').close();
+$('council-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const source = councilSource; if (!source) return;
+  const groups = [...$('council-groups').querySelectorAll('input[data-group]:checked')].map(input => input.dataset.group);
+  const body = { name: $('council-name').value, purpose: $('council-purpose').value, seats: source.seats, settings: keep(source.snapshot.settings, groups) };
+  const renaming = source.editing && $('council-rename').checked && !$('council-rename-label').classList.contains('hidden');
+  const sameAsEditing = source.editing && body.name.replace(/\s+/g, ' ').trim().toLowerCase() === source.editing.name.toLowerCase();
+  $('council-submit').disabled = true;
+  try {
+    const saved = renaming || sameAsEditing ? await api(`/api/councils/${source.editing.id}`, 'PUT', body) : await api('/api/councils', 'POST', { ...body, replace: true });
+    state.councils = [...(state.councils || []).filter(c => c.id !== saved.id), saved];
+    if (source.from === 'form') state.council = saved.id;
+    $('council-dialog').close(); saveDraft();
+    toast(`Saved the council “${saved.name}”: ${describeCouncil(saved, seatName)}.`);
+  } catch (error) { $('council-error').textContent = error.message; }
+  finally { $('council-submit').disabled = false; }
+});
+
+// Model suggestions come from the provider itself, asked through the server, which holds the keys: Codex's catalog from its CLI,
+// Claude Code's aliases plus Anthropic's list when a key exists, and each API's own model list. Free text is always allowed.
+let modelList = { models: [], hidden: [] }, modelRequest = null, modelTimer = null;
+const SOURCES = { 'codex-cli': 'the Codex CLI', 'claude-cli': 'Anthropic', compatible: 'this server' };
+function ago(iso) {
+  const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  return seconds < 60 ? 'just now' : seconds < 3600 ? `${Math.round(seconds / 60)} min ago` : seconds < 86400 ? `${Math.round(seconds / 3600)} h ago` : `${Math.round(seconds / 86400)} days ago`;
+}
+function modelLabel(m) {
+  const bits = [m.label, m.created?.slice(0, 10), m.context ? `${m.context >= 1e6 ? `${(m.context / 1e6).toFixed(m.context % 1e6 ? 1 : 0)}M` : `${Math.round(m.context / 1000)}k`} context` : '', m.description].filter(Boolean);
+  return bits.join(' · ');
+}
+function modelRequestBody(refresh) {
+  const type = $('provider-type').value, body = { type, refresh };
+  // Editing uses the saved key unless it is being removed; a sibling made with "Add another model" never borrows one.
+  if (editingId && !$('clear-key').checked) body.connectionId = editingId;
+  const key = $('provider-key').value.trim();
+  if (key && !state.types[type]?.cli) body.apiKey = key;
+  if (type === 'compatible') body.baseUrl = $('provider-url').value.trim();
+  return body;
+}
+// state: waiting, ok, error, or unreachable (the provider could not be reached or did not answer in time), for styling and checks.
+function showModelStatus(text, warn = false, stateName = warn ? 'error' : 'ok') {
+  $('model-status').textContent = text; $('model-status').classList.toggle('warn', warn); $('model-status').dataset.state = stateName;
+}
+// A wait that runs past two seconds says how long it has been and when it will give up, so a provider that never answers shows
+// as exactly that rather than as a status line that never changes.
+let modelTicker = null;
+function waitTicker(show, limitSeconds) {
+  const started = Date.now();
+  const tick = () => { const seconds = Math.floor((Date.now() - started) / 1000); show(seconds >= 2 ? ` ${seconds} s (gives up after ${limitSeconds} s)` : ''); };
+  tick();
+  const timer = setInterval(tick, 1000);
+  return () => clearInterval(timer);
+}
+async function loadModels({ refresh = false } = {}) {
+  clearTimeout(modelTimer); modelRequest?.abort(); modelTicker?.();
+  const type = $('provider-type').value;
+  modelList = { models: [], hidden: [] }; renderModelOptions();
+  if (type === 'compatible' && !/^https?:\/\/[^/]+/.test($('provider-url').value.trim())) { showModelStatus('Enter the base URL to list the models this server offers.'); return; }
+  const controller = modelRequest = new AbortController();
+  const stop = modelTicker = waitTicker(elapsed => showModelStatus(`${refresh ? 'Asking the provider again…' : 'Listing models…'}${elapsed}`, false, 'waiting'), state.limits?.listSeconds || 10);
+  $('model-refresh').disabled = true;
+  try {
+    const result = await api('/api/models', 'POST', modelRequestBody(refresh), false, controller.signal);
+    if (controller.signal.aborted || controller !== modelRequest || type !== $('provider-type').value) return;
+    modelList = result;
+  } catch (error) {
+    if (controller.signal.aborted) return;
+    modelList = { models: [], hidden: [], error: error.message };
+  } finally { stop(); if (controller === modelRequest) { $('model-refresh').disabled = false; modelTicker = null; } }
+  renderModelOptions();
+}
+const scheduleModels = () => { clearTimeout(modelTimer); modelRequest?.abort(); modelTicker?.(); showModelStatus('Listing models when you stop typing…', false, 'waiting'); modelTimer = setTimeout(() => loadModels(), 600); };
+function renderModelOptions() {
+  const type = $('provider-type').value, r = modelList;
+  $('model-options').innerHTML = r.models.map(m => `<option value="${escapeHTML(m.id)}">${escapeHTML(modelLabel(m))}</option>`).join('');
+  if (r.source) {
+    const from = SOURCES[type] || state.types[type]?.label || 'the provider';
+    const key = { typed: ' with the key above', saved: ' with the saved key', environment: ' with the server’s environment key' }[r.keySource] || '';
+    const aliases = type === 'claude-cli' ? r.models.filter(m => !m.id.includes('-')).length : 0;
+    const listed = r.models.length - aliases;
+    const hidden = r.hidden?.length ? ` ${r.hidden.length} more ${r.hidden.length === 1 ? 'is hidden because it is' : 'are hidden because they are'} not for conversation.` : '';
+    const notes = `${r.skipped ? ` ${r.skipped} ${r.skipped === 1 ? 'entry' : 'entries'} in the list could not be read and ${r.skipped === 1 ? 'was' : 'were'} skipped.` : ''}${r.truncated ? ' The list was longer than this app reads; only the first part is offered.' : ''}`;
+    // A provider that cannot be reached, or did not answer in time, says so plainly, with what to check, whether a saved list is
+    // shown instead, and when it was last tried if that was a moment ago.
+    const reach = ['unreachable', 'timeout'].includes(r.errorKind);
+    const problem = r.error ? `${r.error}${r.hint ? ` ${r.hint}` : ''}${r.remembered && r.failedAt ? ` (Tried ${ago(r.failedAt)}; Refresh list tries again now.)` : ''}` : '';
+    let text;
+    if (r.needsKey) { showModelStatus(`Paste a key above to list the models ${state.types[type]?.label || 'this provider'} offers${r.env ? `, or set ${r.env} on the server` : ''}. You can also type the model ID.`); updateModelWarning(); return; }
+    if (type === 'claude-cli' && r.source === 'aliases') text = `${aliases} Claude Code aliases, which follow the newest model of each family. ${r.note || ''}`;
+    else if (!listed && r.error) text = `${aliases ? `${aliases} Claude Code aliases. ` : ''}${reach ? `⚠ Can’t reach ${from}` : 'Couldn’t list models'}${r.keyFrom ? ` with the key from ${r.keyFrom}` : ''}: ${problem} You can still type the model ID.`;
+    else if (!listed) text = `${aliases ? `${aliases} Claude Code aliases; ` : ''}${from} listed no models${key}.${hidden}${notes}`;
+    else if (r.stale) text = `${reach ? '⚠ ' : ''}Showing the ${listed} model${listed === 1 ? '' : 's'} ${from} listed ${ago(r.fetchedAt)}${r.keyFrom ? ` (key from ${r.keyFrom})` : key}. ${reach ? `It can’t be reached now` : 'Asking again failed'}: ${problem}${hidden}${notes}`;
+    else text = `${aliases ? `${aliases} Claude Code aliases and ` : ''}${listed} model${listed === 1 ? '' : 's'} from ${from}${r.keyFrom ? ` (key from ${r.keyFrom})` : key}, listed ${ago(r.fetchedAt)}.${hidden}${notes}`;
+    showModelStatus(text.trim(), Boolean(r.error), reach ? 'unreachable' : r.error ? 'error' : 'ok');
+  } else if (r.error) showModelStatus(`Couldn’t list models: ${r.error}`, true);
+  updateModelWarning();
+}
+// The same comparison the server makes when the connection is saved, shown while the ID is typed. A warning, never a block.
+function updateModelWarning() {
+  const type = $('provider-type').value, id = $('provider-model').value.trim(), r = modelList;
+  let text = '';
+  if (id && r.models.length && !findModel(type, id, r.models)) {
+    const hidden = findModel(type, id, r.hidden);
+    if (hidden) text = `${id} is listed as ${hidden.reason}, not one a council member can talk with. You can still save it, but its turns will likely fail.`;
+    else if (!(type === 'claude-cli' && r.aliasesOnly)) text = `${id} is not in the list ${SOURCES[type] || state.types[type]?.label || 'the provider'} returned. You can still save it; check the ID if its first turn fails.`;
+  }
+  $('model-warning').textContent = text; $('model-warning').classList.toggle('hidden', !text);
 }
 function applyPreset() {
   const preset = (state.presets || []).find(p => p.id === $('provider-preset').value);
   if (!preset) return;
   $('provider-url').value = preset.baseUrl; if (!$('provider-name').value) $('provider-name').value = preset.label.replace(/ \(.*\)$/, '');
   $('model-hint').textContent = preset.hint;
+  loadModels();
 }
 function formType() {
-  const type = $('provider-type').value, cli = state.types[type].cli;
-  $('model-options').innerHTML = modelOptions(type).map(m => `<option value="${escapeHTML(m.id)}">${escapeHTML(m.label && m.label !== m.id ? `${m.label}${m.description ? ' — ' + m.description : ''}` : m.description || '')}</option>`).join('');
+  // Only CLI types carry cli: true. A bare undefined would make classList.toggle flip the key field instead of setting it.
+  const type = $('provider-type').value, cli = Boolean(state.types[type].cli);
   $('preset-label').classList.toggle('hidden', type !== 'compatible');
   $('provider-preset').innerHTML = '<option value="">Custom endpoint</option>' + (state.presets || []).filter(p => p.type === 'compatible').map(p => `<option value="${escapeHTML(p.id)}">${escapeHTML(p.label)}</option>`).join('');
   $('api-key-label').classList.toggle('hidden', cli); $('clear-key-label').classList.toggle('hidden', cli || !editingId);
   $('base-url-label').classList.toggle('hidden', type !== 'compatible'); $('provider-url').required = type === 'compatible'; $('provider-model').required = !cli;
   $('provider-model').placeholder = cli ? 'Blank uses the CLI default model' : 'Exact model ID from your provider';
-  const options = modelOptions(type);
-  $('model-hint').textContent = cli ? `Uses your installed ${type === 'codex-cli' ? 'codex' : 'claude'} tool and its active sign-in. ${options.length ? 'Pick a model from the list or type any ID the tool accepts; blank uses its default.' : 'Blank uses the tool’s default model.'}` : type === 'huggingface' ? (state.presets || []).find(p => p.id === 'huggingface')?.hint || '' : 'Use a model available to your API account. Model IDs are editable so you can use new releases.';
+  $('model-hint').textContent = cli ? `Uses your installed ${type === 'codex-cli' ? 'codex' : 'claude'} tool and its active sign-in. Pick a model from the list or type any ID the tool accepts; blank uses its default.` : type === 'huggingface' ? (state.presets || []).find(p => p.id === 'huggingface')?.hint || '' : 'Pick a model from the list the provider returns, or type any ID your account can use.';
+  loadModels();
 }
 function openProvider(id, duplicateOf) {
   editingId = id || null; $('provider-form').reset(); $('provider-error').textContent = '';
   $('dialog-title').textContent = id ? 'Edit connection' : duplicateOf ? 'Add another model' : 'Add a connection';
   $('delete-connection').classList.toggle('hidden', !id);
   $('provider-type').innerHTML = Object.entries(state.types).map(([value, t]) => `<option value="${value}">${escapeHTML(t.label)}</option>`).join('');
+  modelRequest?.abort(); modelList = { models: [], hidden: [] }; clearTest();
   const p = state.providers.find(p => p.id === (id || duplicateOf));
   if (p) { $('provider-type').value = p.type; $('provider-name').value = duplicateOf ? `${p.name} ` : p.name; $('provider-model').value = duplicateOf ? '' : p.model; $('provider-url').value = p.baseUrl || ''; $('provider-role').value = p.role; }
   else $('provider-type').value = 'openai';
@@ -1043,21 +1261,81 @@ function openProvider(id, duplicateOf) {
   formType(); if (duplicateOf) { $('provider-model').focus(); }
   $('provider-dialog').showModal();
 }
+// What the form holds, as saving and testing both send it. Editing names the connection so its saved key can be used.
+function providerFormData() {
+  return { type: $('provider-type').value, name: $('provider-name').value, model: $('provider-model').value, baseUrl: $('provider-url').value, apiKey: $('provider-key').value, clearKey: $('clear-key').checked, role: $('provider-role').value, ...(editingId ? { connectionId: editingId } : {}) };
+}
+// Test connection: one short message through the path a meeting uses, with what the form holds, before anything is saved. The
+// result is cleared as soon as the form changes, so it always describes what Save would store.
+let testRequest = null, testTicker = null;
+function clearTest() {
+  testRequest?.abort(); testRequest = null; testTicker?.(); testTicker = null;
+  $('test-result').classList.add('hidden'); $('test-result').innerHTML = '';
+  $('test-connection').textContent = 'Test connection';
+}
+const MARKS = { ok: '✓', warn: '!', fail: '✗' };
+function showTest(result) {
+  const summary = result.ok ? (result.checks.some(c => c.state === 'warn') ? 'The connection works, with a warning.' : 'The connection works.') : result.cancelled ? 'Test cancelled.' : 'The connection did not work.';
+  $('test-result').innerHTML = `<p class="test-summary ${result.ok ? 'ok' : 'fail'}">${escapeHTML(summary)}</p><ul>${result.checks.map(c => `<li class="${c.state}"><span aria-hidden="true">${MARKS[c.state]}</span>${escapeHTML(c.text)}</li>`).join('')}</ul>`;
+  $('test-result').classList.remove('hidden');
+}
+// How long the server waits for this form's test: a CLI or a server on this machine gets longer than a hosted API.
+function testLimit(type) {
+  const limits = state.limits?.testSeconds || { api: 30, local: 120, cli: 120 };
+  if (state.types[type]?.cli) return limits.cli;
+  if (type === 'compatible') { try { if (['localhost', '127.0.0.1', '[::1]'].includes(new URL($('provider-url').value).hostname)) return limits.local; } catch {} }
+  return limits.api;
+}
+// While a test runs, its button cancels it: a provider that never answers should not hold the form until the deadline.
+async function testProvider() {
+  if (testRequest) { clearTest(); showTest({ ok: false, cancelled: true, checks: [{ state: 'fail', text: 'Cancelled before an answer came back. Nothing was saved.' }] }); $('test-connection').textContent = 'Test again'; return; }
+  clearTest();
+  const controller = testRequest = new AbortController();
+  const type = $('provider-type').value, cli = state.types[type]?.cli, model = $('provider-model').value.trim();
+  $('test-connection').textContent = 'Cancel test';
+  const note = `<p class="test-note">${cli ? 'This runs the CLI once and counts against its plan allowance.' : type === 'compatible' ? 'Nothing is saved until you press Save.' : 'The provider bills it as a few tokens. Nothing is saved until you press Save.'}</p>`;
+  testTicker = waitTicker(elapsed => { $('test-result').innerHTML = `<p>Sending one short message to ${escapeHTML(model || 'the default model')}…${escapeHTML(elapsed)}</p>${note}`; }, testLimit(type));
+  $('test-result').classList.remove('hidden');
+  try {
+    const result = await api('/api/providers/test', 'POST', providerFormData(), false, controller.signal);
+    if (controller.signal.aborted || controller !== testRequest) return;
+    testTicker?.(); showTest(result);
+  } catch (error) {
+    if (controller.signal.aborted || controller !== testRequest) return;
+    testTicker?.(); showTest({ ok: false, checks: [{ state: 'fail', text: error.message }] });
+  } finally {
+    if (controller === testRequest) { testRequest = null; testTicker = null; $('test-connection').textContent = 'Test again'; }
+  }
+}
+$('test-connection').onclick = testProvider;
+for (const id of ['provider-type', 'provider-url', 'clear-key']) $(id).addEventListener('change', clearTest);
+for (const id of ['provider-model', 'provider-key', 'provider-url']) $(id).addEventListener('input', clearTest);
+
 $('provider-form').addEventListener('submit', async event => {
   event.preventDefault(); const button = event.submitter; button.disabled = true;
   try {
-    const data = { type: $('provider-type').value, name: $('provider-name').value, model: $('provider-model').value, baseUrl: $('provider-url').value, apiKey: $('provider-key').value, clearKey: $('clear-key').checked, role: $('provider-role').value };
-    const saved = await api(editingId ? `/api/providers/${editingId}` : '/api/providers', editingId ? 'PUT' : 'POST', data);
-    if (editingId) state.providers = state.providers.map(p => p.id === editingId ? saved : p); else { state.providers.push(saved); if (state.selected.size < 6) state.selected.add(saved.id); }
-    $('provider-key').value = ''; $('provider-dialog').close(); renderProviders(); toast('Connection saved.');
+    const { connectionId, ...data } = providerFormData();
+    const { modelCheck, ...saved } = await api(editingId ? `/api/providers/${editingId}` : '/api/providers', editingId ? 'PUT' : 'POST', data);
+    if (editingId) state.providers = state.providers.map(p => p.id === editingId ? saved : p); else { state.providers.push(saved); if (state.selected.size < MAX_SEATS) state.selected.add(saved.id); }
+    $('provider-key').value = ''; $('provider-dialog').close(); renderProviders();
+    toast(['unlisted', 'not-for-conversation'].includes(modelCheck?.status) ? `Connection saved. Warning: ${modelCheck.detail}` : 'Connection saved.');
   } catch (error) { $('provider-error').textContent = error.message; } finally { button.disabled = false; }
 });
 $('delete-connection').onclick = async () => {
-  try { await api(`/api/providers/${editingId}`, 'DELETE'); state.providers = state.providers.filter(p => p.id !== editingId); $('provider-dialog').close(); renderProviders(); toast('Connection removed.'); }
+  try {
+    const removed = await api(`/api/providers/${editingId}`, 'DELETE'); state.providers = state.providers.filter(p => p.id !== editingId);
+    if (removed.councils?.length) state.councils = await api('/api/councils');
+    $('provider-dialog').close(); renderProviders();
+    toast(removed.councils?.length ? `Connection removed. It also left ${removed.councils.map(c => `${c.name} (${c.seatsLeft} ${c.seatsLeft === 1 ? 'seat' : 'seats'} left${c.notes.length ? `; ${c.notes.join('; ')}` : ''})`).join(', ')}.` : 'Connection removed.');
+  }
   catch (error) { $('provider-error').textContent = error.message; }
 };
-$('provider-dialog').addEventListener('close', () => { $('provider-key').value = ''; });
-$('provider-type').onchange = formType; $('provider-preset').onchange = applyPreset; $('close-dialog').onclick = () => $('provider-dialog').close();
+$('provider-dialog').addEventListener('close', () => { $('provider-key').value = ''; clearTimeout(modelTimer); modelRequest?.abort(); modelRequest = null; modelTicker?.(); modelTicker = null; clearTest(); });
+// A key belongs to one provider: changing the type clears a typed key, so it is never sent to another provider's list. A compatible
+// server is asked once its address is complete (the field is left or Enter pressed), never at a half-typed host.
+$('provider-type').onchange = () => { $('provider-key').value = ''; formType(); }; $('provider-preset').onchange = applyPreset;
+$('provider-key').addEventListener('input', scheduleModels); $('provider-url').addEventListener('change', () => loadModels()); $('clear-key').addEventListener('change', () => loadModels());
+$('provider-model').addEventListener('input', updateModelWarning); $('model-refresh').onclick = () => loadModels({ refresh: true }); $('close-dialog').onclick = () => $('provider-dialog').close();
 $('connections-nav').onclick = $('manage-connections').onclick = () => showPage('connections'); $('workspace-nav').onclick = () => showPage('workspace'); $('security-nav').onclick = () => showPage('security'); $('archive-nav').onclick = () => showPage('archive');
 // ---------- security page ----------
 let securityEvents;
@@ -1228,7 +1506,10 @@ $('reuse').onclick = () => { const prompt = currentRun.prompt; newDiscussion(); 
     if (draft.prompt) $('prompt').value = draft.prompt;
     $('research').checked = draft.research === true; $('deep-research').checked = draft.deepResearch === true;
     for (const [id, value] of [['rounds', draft.rounds], ['revisions', draft.revisions], ['max-calls', draft.maxCalls], ['duration', draft.duration], ['max-tokens', draft.maxTokens], ['timeout', draft.timeout]]) if (value) $(id).value = value;
+    $('neutral-drafter').checked = draft.neutralDrafter === true;
+    if (draft.council && (state.councils || []).some(c => c.id === draft.council)) state.council = draft.council;
     renderProviders(); if (draft.synthesizer && state.selected.has(draft.synthesizer)) $('synthesizer').value = draft.synthesizer;
+    renderCouncils();
     if (draft.workspacePath) $('workspace-path').value = draft.workspacePath; if (draft.workspaceChecks) $('workspace-checks').value = draft.workspaceChecks;
     try { state.workspaceConfig = await api('/api/workspace'); } catch { state.workspaceConfig = {}; }
     workspaceSetup();

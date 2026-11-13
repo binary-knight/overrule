@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../server.mjs';
 import { git } from '../lib/workspace.mjs';
+import { startFakeProvider } from './fake-provider.mjs';
+import { OVERRIDE_ENV } from '../lib/providers.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
@@ -15,7 +17,8 @@ const directory = await mkdtemp(join(tmpdir(), 'mesh-browser-'));
 const project = await mkdtemp(join(tmpdir(), 'mesh-browser-project-with-a-deliberately-long-name-'));
 const block = value => '\n```json\n' + JSON.stringify(value) + '\n```';
 let checks = 0, drafts = 0;
-const { server, access, mesh } = createApp({ directory, detect: async () => ({ codex: { installed: true, signedIn: true }, claude: { installed: true, signedIn: true } }),
+// Model lists give up after three seconds here rather than ten, so the waiting and unreachable states are quick to reach.
+const { server, access, mesh } = createApp({ directory, catalogOptions: { timeoutMs: 3000 }, detect: async () => ({ codex: { installed: true, signedIn: true }, claude: { installed: true, signedIn: true } }),
   canary: async () => ({ ok: true }), measure: async () => ({ available: false }),
   providerCall: async (provider, request) => {
     if (/You are the IMPLEMENTER/.test(request.prompt)) {
@@ -31,6 +34,9 @@ const { server, access, mesh } = createApp({ directory, detect: async () => ({ c
   },
 });
 let browser;
+// Model suggestions come from a fake provider on this machine, through the same override a developer would use.
+const fake = await startFakeProvider();
+process.env[OVERRIDE_ENV] = fake.url;
 try {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '0.0.0.0', resolve); });
   browser = await chromium.launch({ headless: true });
@@ -64,6 +70,112 @@ try {
   const connection = await page.locator('.connection-card').last(); await connection.locator('[data-edit]').click();
   assert.equal(await page.inputValue('#provider-key'), ''); await page.click('#delete-connection');
   await page.waitForSelector('#provider-dialog', { state: 'hidden' });
+  // Model suggestions: the key field shows for the default type, the list arrives once a key is typed, an unlisted ID is a warning
+  // while typing and after saving, and a typed key is cleared when the type changes so it never reaches another provider.
+  const modelStatus = pattern => page.waitForFunction(source => new RegExp(source).test(document.querySelector('#model-status').textContent), pattern.source);
+  assert.match(await page.locator('#provider-override').textContent(), new RegExp(`${OVERRIDE_ENV} is set`));
+  await page.click('#add-connection');
+  assert.equal(await page.inputValue('#provider-type'), 'openai'); assert.ok(await page.isVisible('#provider-key'));
+  await modelStatus(/Paste a key above/);
+  await page.fill('#provider-key', 'fake-key'); await modelStatus(/^7 models from OpenAI API with the key above/);
+  assert.equal(await page.locator('#model-options option').count(), 7);
+  assert.equal(await page.locator('#model-options option').first().getAttribute('value'), 'gpt-6-astra');
+  await page.fill('#provider-name', 'Astra'); await page.fill('#provider-model', 'gpt-6-astr');
+  assert.match(await page.locator('#model-warning').textContent(), /gpt-6-astr is not in the list OpenAI API returned/);
+  await page.fill('#provider-model', 'gpt-6-astra'); assert.ok(await page.isHidden('#model-warning'));
+  await page.fill('#provider-model', 'text-embedding-3-large'); assert.match(await page.locator('#model-warning').textContent(), /embedding or ranking model/);
+  await page.selectOption('#provider-type', 'anthropic');
+  assert.equal(await page.inputValue('#provider-key'), ''); assert.ok(await page.isVisible('#provider-key'));
+  await page.selectOption('#provider-type', 'claude-cli'); await modelStatus(/^4 Claude Code aliases/);
+  assert.deepEqual(await page.locator('#model-options option').evaluateAll(options => options.map(o => o.value)), ['fable', 'opus', 'sonnet', 'haiku']);
+  await page.selectOption('#provider-type', 'openai'); await page.fill('#provider-key', 'fake-key'); await modelStatus(/^7 models/);
+  // Test connection: the unsaved form is tried through the meeting path; the result goes as soon as the form changes.
+  const testResult = async () => { await page.waitForFunction(() => !/Sending/.test(document.querySelector('#test-result').textContent)); return page.locator('#test-result').textContent(); };
+  await page.fill('#provider-model', 'gpt-6-astra'); await page.click('#test-connection');
+  assert.match(await testResult(), /^The connection works\.✓Reached [^✓]+✓The key given was accepted✓gpt-6-astra answered in \d+ ms: “OK”$/);
+  await page.fill('#provider-model', 'gpt-6-astr'); assert.ok(await page.isHidden('#test-result'));
+  await page.click('#test-connection');
+  assert.match(await testResult(), /^The connection did not work\..*does not know the model gpt-6-astr \(HTTP 404, model_not_found\)/);
+  assert.equal(await page.locator('#test-connection').textContent(), 'Test again');
+  await page.screenshot({ path: join(root, 'artifacts', 'connection-test.png') });
+  // Failure handling in the form. A provider that never answers: the wait counts up and says when it gives up, then says the
+  // provider cannot be reached. A test against it can be cancelled. A list already fetched is kept, marked, when the provider fails.
+  const modelState = value => page.waitForFunction(v => document.querySelector('#model-status').dataset.state === v, value, { timeout: 15000 });
+  const canary = `fake-hang-browsercanary${Date.now()}`;
+  const bodies = [];
+  page.on('response', response => { if (response.url().includes('/api/')) bodies.push(response.text().catch(() => '')); });
+  await page.fill('#provider-key', canary);
+  await modelStatus(/^Listing models… 2 s \(gives up after 3 s\)$/);
+  await modelState('unreachable');
+  assert.match(await page.locator('#model-status').textContent(), /^⚠ Can’t reach OpenAI API: The provider did not answer within 3 seconds\. The provider may be busy.*You can still type the model ID\.$/);
+  await page.click('#test-connection');
+  await page.waitForFunction(() => /Sending one short message to gpt-6-astr… [2-9] s \(gives up after 30 s\)/.test(document.querySelector('#test-result').textContent));
+  assert.equal(await page.locator('#test-connection').textContent(), 'Cancel test');
+  await page.click('#test-connection');
+  assert.match(await page.locator('#test-result').textContent(), /^Test cancelled\.✗Cancelled before an answer came back\. Nothing was saved\.$/);
+  await page.screenshot({ path: join(root, 'artifacts', 'connection-unreachable.png') });
+  await page.fill('#provider-key', 'fake-key'); await modelStatus(/^7 models/);
+  fake.modes.openai = 'hang';
+  await page.click('#model-refresh'); await modelState('unreachable');
+  assert.match(await page.locator('#model-status').textContent(), /^⚠ Showing the 7 models OpenAI API listed just now with the key above\. It can’t be reached now: The provider did not answer within 3 seconds\./);
+  assert.equal(await page.locator('#model-options option').count(), 7, 'the old list is still offered');
+  delete fake.modes.openai;
+  // A local server that is not running says so, with what to check.
+  await page.selectOption('#provider-type', 'compatible'); await page.fill('#provider-url', 'http://127.0.0.1:9/v1'); await page.press('#provider-url', 'Tab');
+  await modelState('unreachable');
+  assert.match(await page.locator('#model-status').textContent(), /^⚠ Can’t reach this server: Could not reach 127\.0\.0\.1:9\. Check that the server is running at http:\/\/127\.0\.0\.1:9\/v1 \(for Ollama, ollama serve\), then try again\./);
+  // The typed key never came back in any answer, and nothing in the browser kept it.
+  assert.ok(!(await Promise.all(bodies)).some(text => text.includes('browsercanary')), 'a typed key came back from the server');
+  assert.ok(!(await page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }))).includes('browsercanary'));
+  await page.selectOption('#provider-type', 'openai');
+  await page.fill('#provider-key', 'fake-key'); await modelStatus(/^7 models/); await page.fill('#provider-model', 'gpt-6-astr');
+  await page.click('#provider-form button[type=submit]'); await page.waitForSelector('#provider-dialog', { state: 'hidden' });
+  assert.match(await page.locator('#toast').textContent(), /^Connection saved\. Warning: gpt-6-astr is not among the 7 models OpenAI API listed/);
+  await page.locator('.connection-card', { hasText: 'Astra' }).locator('[data-edit]').click();
+  await modelStatus(/with the saved key/); await page.click('#model-refresh'); await modelStatus(/listed just now/);
+  await page.click('#delete-connection'); await page.waitForSelector('#provider-dialog', { state: 'hidden' });
+  // Saved councils and the seat limit. Seven local connections join the two defaults, so eight can be seated and a ninth refused.
+  {
+    const token = (await (await page.request.get(base + '/api/bootstrap')).json()).token;
+    const extra = [];
+    for (let i = 1; i <= 7; i++) extra.push((await (await page.request.post(base + '/api/providers', { headers: { 'X-Mesh-Token': token }, data: { type: 'compatible', name: `Local ${i}`, model: 'm', baseUrl: 'http://127.0.0.1:9/v1' } })).json()).id);
+    await page.reload(); await page.click('#workspace-nav'); await page.waitForSelector('.participant');
+    const seat = id => page.click(`#participants input[value="${id}"]`);
+    const seated = () => page.$$eval('#participants input:checked', inputs => inputs.map(i => i.value));
+    for (const id of extra.slice(0, 6)) await seat(id);
+    assert.equal((await seated()).length, 8, 'eight seats, as the server and the command line allow');
+    await seat(extra[6]);
+    assert.equal((await seated()).length, 8); assert.equal(await page.locator('#toast').textContent(), 'A meeting seats up to 8 members.');
+    assert.match(await page.locator('.seats-hint').textContent(), /unchecked stays saved under Connections/);
+    // Save the eight as "Wide", keeping everything but the limits.
+    await page.selectOption('#rounds', '3');
+    await page.click('#council-save'); await page.fill('#council-name', 'Wide'); await page.fill('#council-purpose', 'Everyone at once');
+    await page.uncheck('#council-groups input[data-group="limits"]');
+    await page.click('#council-submit'); await page.waitForSelector('#council-dialog', { state: 'hidden' });
+    assert.match(await page.locator('#toast').textContent(), /^Saved the council “Wide”: Codex, Claude Code, Local 1, .* · Codex drafts · 3 cycles · 1 revision · no research\.$/);
+    assert.equal(await page.locator('#council-select option:checked').textContent(), 'Wide');
+    // Seat two, then pick Wide again: its seats and kept settings come back.
+    for (const id of extra.slice(0, 6)) await seat(id);
+    await page.selectOption('#rounds', '1');
+    assert.match(await page.locator('#council-note').textContent(), /Changed since you picked it: seats, meeting length\./);
+    await page.selectOption('#council-select', ''); await page.selectOption('#council-select', { label: 'Wide' });
+    assert.equal((await seated()).length, 8); assert.equal(await page.inputValue('#rounds'), '3');
+    assert.match(await page.locator('#council-note').textContent(), /^Everyone at onceKeeps: Codex, Claude Code, Local 1/);
+    assert.doesNotMatch(await page.locator('#council-note').textContent(), /Changed/);
+    // Deleting a seated connection takes it out of the council, and the owner is told.
+    await page.click('#connections-nav'); await page.locator('.connection-card', { hasText: 'Local 1' }).locator('[data-edit]').click();
+    await page.click('#delete-connection'); await page.waitForSelector('#provider-dialog', { state: 'hidden' });
+    assert.equal(await page.locator('#toast').textContent(), 'Connection removed. It also left Wide (7 seats left).');
+    await page.click('#workspace-nav');
+    assert.match(await page.locator('#council-note').textContent(), /Keeps: Codex, Claude Code, Local 2,/);
+    // Delete the council: the seats it chose stay chosen, and its connections stay saved.
+    await page.click('#council-delete'); await page.click('#confirm-ok');
+    await page.waitForFunction(() => document.querySelectorAll('#council-select option').length === 1);
+    assert.equal((await seated()).length, 7);
+    for (const id of extra.slice(1)) await page.request.delete(`${base}/api/providers/${id}`, { headers: { 'X-Mesh-Token': token } });
+    await page.reload(); await page.waitForSelector('.participant');
+    await page.selectOption('#rounds', '2');
+  }
   await page.click('#workspace-nav'); await page.click('#demo');
   await page.waitForFunction(() => document.querySelector('#run-title').textContent === 'Approved');
   assert.equal(await page.locator('.msg').count(), 8);
@@ -221,7 +333,7 @@ try {
   assert.equal(await page.locator(`[data-run="${objectedId}"]`).count(), 0);
   assert.equal((await page.request.get(`${base}/api/runs/${objectedId}`)).status(), 404);
   assert.deepEqual(errors, []);
-  console.log('Browser checks passed: desktop, mobile, connections, escaped content, demo, history, export, citation links, verdicts, limit settings and resume, cancellation, search, archive, settings, renaming, pinning, deletion, LAN pairing, and workspace verification retry. No live model calls.');
+  console.log('Browser checks passed: desktop, mobile, connections, model suggestions, connection tests, saved councils, the eight-seat limit, escaped content, demo, history, export, citation links, verdicts, limit settings and resume, cancellation, search, archive, settings, renaming, pinning, deletion, LAN pairing, and workspace verification retry. No live model calls.');
 } finally {
   for (const run of mesh.runs) mesh.cancel(run.id);
   for (let i = 0; i < 1000 && mesh.controllers.size; i++) await delay(10);
@@ -229,4 +341,5 @@ try {
   server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
   await rm(directory, { recursive: true, force: true });
   await rm(project, { recursive: true, force: true });
+  await fake.close();
 }

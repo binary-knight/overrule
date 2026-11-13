@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { buildPlaybook, PLAYBOOKS } from '../public/playbooks.js';
 import { assessResult, callsUsed, issueStatus, openIssuesOf } from '../public/meeting-state.js';
+import { GROUP_IDS, COUNCIL_GROUPS, MAX_SEATS, describeCouncil, snapshotFromRun, keep } from '../public/councils.js';
 
 const DEFAULT_URL = process.env.OVERRULE_URL || 'http://127.0.0.1:4310';
 const USAGE = `overrule — convene a council of models from the command line.
@@ -29,16 +30,49 @@ const USAGE = `overrule — convene a council of models from the command line.
                                           the disk safely holds, which is also the most a number may be.
   overrule delete <id> [--yes]            Permanently delete a stopped meeting and everything kept for it.
   overrule playbooks                      List the report templates.
+  overrule connections [--json]           List connections: each one's model and whether it is ready.
+  overrule connections add --type <type> [--name <name>] [--model <id>] [--preset <id>] [--base-url <url>]
+                           [--key-env <VAR> | --key-stdin] [--role <text>]
+                                          Add a connection. The model is checked against the provider's own list;
+                                          one it does not list is saved with a warning.
+  overrule connections edit <name> [--name <new>] [--model <id>] [--base-url <url>] [--key-env <VAR> | --key-stdin]
+                           [--clear-key] [--role <text>]
+                                          Change a connection; what is not given stays as it is.
+  overrule connections test [<name>] [--type <type>] [--model <id>] [--preset <id>] [--base-url <url>]
+                           [--key-env <VAR> | --key-stdin] [--clear-key]
+                                          Send one short message through the path a meeting uses and say whether the
+                                          provider was reached, the key accepted, and the model answered. Takes what add
+                                          takes, or a connection's name, whose saved values the options override. Nothing
+                                          is saved. Exit status 0 if it works, 1 if not.
+  overrule connections remove <name> [--yes]
+                                          Remove a connection and its saved key.
+  overrule councils [--json]              List saved councils: their seats and what else each keeps.
+  overrule councils save <name> [--members <names>] [--from <meeting id>] [--drafter <name>] [--neutral-drafter]
+                           [--cycles <n>] [--revisions <n>] [--research] [--deep-research] [--call-limit <n>]
+                           [--time-limit <m>] [--turn-limit <s>] [--without <groups>] [--purpose <text>] [--replace]
+                                          Save a council. --members sets its seats, or --from copies a finished meeting's
+                                          seats and settings as it last ran. A council keeps the settings you give, or, with
+                                          --from, all of them except the groups named in --without (drafter, cycles,
+                                          revisions, research, limits). --replace overwrites a council of the same name.
+  overrule councils rename <name> "<new name>"
+  overrule councils remove <name> [--yes]
+  overrule models <type|connection> [--base-url <url>] [--preset <id>] [--key-env <VAR> | --key-stdin] [--refresh] [--all]
+                                          List the models a provider offers, newest first, as the browser suggests them.
+                                          Types: codex, claude, openai, anthropic, gemini, grok, huggingface, compatible.
+                                          A connection's name uses its saved key. Lists are cached for ten minutes;
+                                          --refresh asks again, --all also shows models hidden as not for conversation.
 
 Options
   --playbook <id>        Start from a report template (see: overrule playbooks).
   --path <dir>           Workspace to attach. "review" takes it as its first argument.
   --level <name>         talk, read-only (default with a workspace), workspace-write, full-access.
-  --members <names>      Comma-separated connection names. Default: every ready connection, up to eight.
+  --council <name>       Seat a saved council and apply the settings it keeps. Options given as well override it.
+  --members <names>      Comma-separated connection names, 2 to 8. Default: the council's seats with --council,
+                         otherwise every ready connection, up to eight.
   --drafter <name>       Which member writes the candidate. Default: the first member.
   --neutral-drafter      The drafter writes the answer but does not argue or vote. Needs three or more members.
-  --cycles <n>           Turns per member, 1 to 8. Default 2.
-  --revisions <n>        Revisions allowed after objections, 0 to 5. Default 1.
+  --cycles <n>           Turns per member, 1 to 4. Default 2, or the council's.
+  --revisions <n>        Revisions allowed after objections, 0 to 5. Default 1, or the council's.
   --research             Members that can browse may search the web.
   --deep-research        They research the subject before taking a position. Implies --research.
   --attach <file>        Attach a document. Repeatable.
@@ -59,7 +93,10 @@ Options
   --search <words>       With list: only meetings where every word or "quoted phrase" appears.
   --archived             With list: list archived meetings instead.
   --keep <n>|max         With settings: keep the n most recent meetings, or as many as the disk safely holds.
-  --yes                  Confirm "delete" without asking. Required when there is no terminal to ask on.
+  --yes                  Confirm "delete", "connections remove" or "councils remove" without asking. Required when there is no terminal to ask on.
+  --key-env <VAR>        With connections and models: read the API key from this environment variable of the command line.
+  --key-stdin            With connections and models: read the API key from standard input. Keys are never taken as arguments,
+                         which would leave them in shell history and the process list.
   --json                 Print one JSON object instead of a report.
   --quiet                Print the report only, with no progress.
   --url <address>        Server to use. Default ${DEFAULT_URL}.
@@ -73,7 +110,7 @@ Exit status says whether the council settled the question.
 Treat any non-zero status you do not recognise as retryable rather than as failure.`;
 
 const VERDICT_EXIT = { approved: 0, objections: 2, 'checks-failed': 3, incomplete: 4, unsettled: 5 };
-const FLAGS = new Set(['neutral-drafter', 'research', 'deep-research', 'network', 'json', 'quiet', 'no-wait', 'acknowledge', 'acknowledge-full-access', 'yes', 'archived', 'help', 'version']);
+const FLAGS = new Set(['neutral-drafter', 'research', 'deep-research', 'network', 'json', 'quiet', 'no-wait', 'acknowledge', 'acknowledge-full-access', 'yes', 'archived', 'help', 'version', 'clear-key', 'key-stdin', 'refresh', 'all', 'replace']);
 const MANY = new Set(['attach', 'check', 'exclude', 'tag']);
 
 export function parseArgs(argv) {
@@ -125,13 +162,19 @@ class Client {
 }
 
 // Members: the names the owner gave their connections, or everything that is ready, which is what an agent usually wants.
-function chooseMembers(bootstrap, options) {
+// A saved council by name (or id), as the browser lists them.
+function findCouncil(bootstrap, name) {
+  const wanted = String(name || '').trim().toLowerCase();
+  return (bootstrap.councils || []).find(c => c.name.toLowerCase() === wanted || c.id === name) || null;
+}
+function chooseMembers(bootstrap, options, council = null) {
   const ready = bootstrap.providers.filter(p => {
     const cli = bootstrap.types[p.type]?.cli;
     if (!cli) return p.hasKey || p.environmentKey || p.type === 'compatible';
     return bootstrap.clis[p.type === 'codex-cli' ? 'codex' : 'claude']?.installed !== false;
   });
   let chosen = ready;
+  if (council && !options.members) chosen = council.seats.map(id => bootstrap.providers.find(p => p.id === id)).filter(Boolean);
   if (options.members) {
     const wanted = options.members.split(',').map(name => name.trim().toLowerCase()).filter(Boolean);
     chosen = wanted.map(name => {
@@ -140,9 +183,11 @@ function chooseMembers(bootstrap, options) {
       return found;
     });
   }
-  if (chosen.length < 2) fail(`A meeting needs at least two members; ${chosen.length} are ready. Configure connections in the browser first.`);
-  chosen = chosen.slice(0, 8);
-  const drafter = options.drafter ? chosen.find(p => p.name.toLowerCase() === options.drafter.toLowerCase() || p.id === options.drafter) : chosen[0];
+  if (chosen.length < 2) fail(council && !options.members ? `The council "${council.name}" has ${chosen.length} seat${chosen.length === 1 ? '' : 's'} left; a meeting needs two. Add seats with overrule councils save "${council.name}" --members … --replace, or pass --members.` : `A meeting needs at least two members; ${chosen.length} are ready. Add connections with overrule connections add, or in the browser.`);
+  if (options.members && chosen.length > MAX_SEATS) fail(`A meeting seats up to ${MAX_SEATS} members.`);
+  chosen = chosen.slice(0, MAX_SEATS);
+  const keptDrafter = council?.settings?.drafter?.drafterId;
+  const drafter = options.drafter ? chosen.find(p => p.name.toLowerCase() === options.drafter.toLowerCase() || p.id === options.drafter) : chosen.find(p => p.id === keptDrafter) || chosen[0];
   if (!drafter) fail(`The drafter "${options.drafter}" is not one of the members.`);
   return { participantIds: chosen.map(p => p.id), drafterId: drafter.id, names: chosen.map(p => p.name), seats: chosen };
 }
@@ -205,7 +250,7 @@ export function machineReadable(run, url) {
     openObjections: openIssuesOf(run).length,
     members: (run.participants || []).map(p => p.name), drafter: name(run.drafterId),
     workspace: run.workspace ? { path: run.workspace.path, level: run.workspace.level, origin: run.workspace.origin || null, head: run.workspace.head || null } : null,
-    research: Boolean(run.research), deepResearch: Boolean(run.deepResearch),
+    research: Boolean(run.research), deepResearch: Boolean(run.deepResearch), council: run.council || null,
     metrics: record.metrics || null, error: run.error || null,
     // Model calls and the tokens providers reported, across every session, counted as the interface counts them.
     calls: callsUsed(run, true),
@@ -241,7 +286,59 @@ async function askTerminal(question) {
   try { return /^y(es)?$/i.test((await prompt.question(question)).trim()); } finally { prompt.close(); }
 }
 
-export async function main(argv, { out = console.log, err = console.error, confirm = askTerminal } = {}) {
+// ---- Connections and model suggestions: the same server calls the Connections page makes. ----
+const TYPE_ALIASES = { codex: 'codex-cli', claude: 'claude-cli', 'claude-code': 'claude-cli', hf: 'huggingface', xai: 'grok', google: 'gemini' };
+const typeOf = (bootstrap, value) => {
+  const type = TYPE_ALIASES[String(value || '').toLowerCase()] || String(value || '').toLowerCase();
+  return Object.hasOwn(bootstrap.types, type) ? type : null;
+};
+const typeNames = bootstrap => Object.keys(bootstrap.types).map(t => Object.entries(TYPE_ALIASES).find(([, v]) => v === t)?.[0] || t).join(', ');
+function findConnection(bootstrap, name) {
+  const wanted = String(name || '').trim().toLowerCase();
+  return bootstrap.providers.find(p => p.name.toLowerCase() === wanted || p.id === name) || null;
+}
+function readiness(bootstrap, p) {
+  if (bootstrap.types[p.type]?.cli) {
+    const cli = bootstrap.clis[p.type === 'codex-cli' ? 'codex' : 'claude'] || {};
+    return !cli.installed ? 'CLI not found on the server' : cli.signedIn === true ? 'signed in' : cli.signedIn === false ? 'not signed in' : 'sign-in not checked';
+  }
+  return p.hasKey ? 'saved API key' : p.environmentKey ? 'environment API key' : p.type === 'compatible' ? 'custom endpoint' : 'API key needed';
+}
+// A key comes from an environment variable or standard input, never from an argument.
+async function keyFrom(options, readStdin) {
+  if (options['key-env'] && options['key-stdin']) fail('Use --key-env or --key-stdin, not both.');
+  if (options['key-env']) {
+    const value = process.env[options['key-env']];
+    if (!value) fail(`${options['key-env']} is not set in this shell.`);
+    return value.trim();
+  }
+  if (options['key-stdin']) {
+    const value = await readStdin();
+    if (value === null) fail('--key-stdin reads a piped key, for example: printenv OPENAI_API_KEY | overrule … --key-stdin. Use --key-env to name a variable instead.');
+    if (!value.trim()) fail('No key arrived on standard input.');
+    return value.trim();
+  }
+  return undefined;
+}
+async function pipedInput() {
+  if (process.stdin.isTTY) return null;
+  let data = '';
+  for await (const chunk of process.stdin) { data += chunk; if (data.length > 8192) fail('The key on standard input is too long.'); }
+  return data;
+}
+const overrideNote = bootstrap => bootstrap.providerOverride ? (bootstrap.providerOverride.error ? `${bootstrap.providerOverride.error} API connections will fail until it is fixed or unset.` : `Note: ${bootstrap.providerOverride.env} is set on the server; built-in API connections go to ${bootstrap.providerOverride.url}, not to their providers.`) : '';
+function ago(iso) {
+  const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  return seconds < 60 ? 'just now' : seconds < 3600 ? `${Math.round(seconds / 60)} min ago` : seconds < 86400 ? `${Math.round(seconds / 3600)} h ago` : `${Math.round(seconds / 86400)} days ago`;
+}
+// The warning the Connections page shows after a save, in the same words.
+function reportCheck(check, err) {
+  if (!check) return;
+  if (check.status === 'unlisted' || check.status === 'not-for-conversation') err(`Warning: ${check.detail}`);
+  else if (check.status === 'unchecked') err(`Note: ${check.detail}`);
+}
+
+export async function main(argv, { out = console.log, err = console.error, confirm = askTerminal, readStdin = pipedInput } = {}) {
   const options = parseArgs(argv);
   if (options.help || !options._.length) { out(USAGE); return 0; }
   const command = options._[0];
@@ -250,6 +347,184 @@ export async function main(argv, { out = console.log, err = console.error, confi
   const client = new Client(options.url || DEFAULT_URL, options.code);
   const log = options.quiet || options.json ? () => {} : message => err(message);
 
+  if (command === 'models') {
+    const target = options._[1] || fail(`overrule models needs a connection type or a connection's name.`);
+    const bootstrap = await client.connect();
+    const connection = findConnection(bootstrap, target);
+    const preset = options.preset ? bootstrap.presets.find(p => p.id === options.preset) || fail(`No preset called "${options.preset}". Presets: ${bootstrap.presets.map(p => p.id).join(', ')}.`) : null;
+    const type = connection?.type || preset?.type || typeOf(bootstrap, target) || fail(`"${target}" is neither a connection nor a type. Types: ${typeNames(bootstrap)}. Connections: ${bootstrap.providers.map(p => p.name).join(', ') || 'none'}.`);
+    const apiKey = await keyFrom(options, readStdin);
+    const baseUrl = options['base-url'] || preset?.baseUrl || connection?.baseUrl;
+    if (type === 'compatible' && !baseUrl) fail('An OpenAI-compatible server needs --base-url, for example http://localhost:11434/v1, or --preset ollama.');
+    const result = await client.call('/api/models', 'POST', { type, refresh: Boolean(options.refresh), ...(connection ? { connectionId: connection.id } : {}), ...(apiKey ? { apiKey } : {}), ...(type === 'compatible' ? { baseUrl } : {}) });
+    if (options.json) { out(JSON.stringify(result, null, 2)); return result.models.length || !result.error ? 0 : 1; }
+    const note = overrideNote(bootstrap); if (note) err(note);
+    const label = connection ? `${connection.name} (${bootstrap.types[type].label})` : bootstrap.types[type].label;
+    const aliases = type === 'claude-cli' ? result.models.filter(m => !m.id.includes('-')) : [];
+    const listed = result.models.length - aliases.length;
+    const key = { typed: ' with the key given', saved: ' with the saved key', environment: " with the server's environment key" }[result.keySource] || '';
+    // Why a list failed, what to check, and whether that failure was remembered from a moment ago rather than asked now.
+    const reach = ['unreachable', 'timeout'].includes(result.errorKind);
+    const problem = `${result.error}${result.hint ? ` ${result.hint}` : ''}${result.remembered && result.failedAt ? ` (Tried ${ago(result.failedAt)}; --refresh tries again now.)` : ''}`;
+    const hiddenNote = result.hidden?.length ? ` ${result.hidden.length} hidden as not for conversation${options.all ? '' : ' (--all shows them)'}.` : '';
+    if (result.source === 'aliases') out(`${label}: ${aliases.length} aliases, which follow the newest model of each family. ${result.note || ''}`.trim());
+    else if (result.needsKey) err(`${label} lists its models only for a key. Pass --key-env <VAR> or --key-stdin${result.env ? `, or set ${result.env} where the server runs` : ''}.`);
+    else if (!listed && result.error) err(`${label}: ${reach ? "can't reach the provider" : "couldn't list models"}${result.keyFrom ? ` with the key from ${result.keyFrom}` : ''}. ${problem}`);
+    else {
+      if (!listed) out(`${label}: listed no models${key}.${hiddenNote}`);
+      else out(`${label}: ${listed} model${listed === 1 ? '' : 's'}${aliases.length ? ` and ${aliases.length} aliases` : ''}, listed ${ago(result.fetchedAt)}${result.keyFrom ? ` with the key from ${result.keyFrom}` : key}.${hiddenNote}`);
+      if (result.stale) err(`Warning: ${reach ? "the provider can't be reached now" : 'asking again failed'}, so this is the list it gave ${ago(result.fetchedAt)}. ${problem}`);
+      if (result.skipped) err(`Note: ${result.skipped} ${result.skipped === 1 ? 'entry' : 'entries'} in the list could not be read and ${result.skipped === 1 ? 'was' : 'were'} skipped.`);
+      if (result.truncated) err('Note: the list was longer than Overrule reads; only the first part is shown.');
+    }
+    const width = Math.min(48, Math.max(10, ...result.models.map(m => m.id.length), ...(options.all ? result.hidden.map(m => m.id.length) : [])));
+    for (const m of result.models) out(`  ${m.id.padEnd(width)}  ${[!m.id.includes('-') && type === 'claude-cli' ? 'alias' : '', m.label, m.created?.slice(0, 10), m.context ? `${m.context.toLocaleString('en-US')} tokens` : '', m.description].filter(Boolean).join(' · ')}`.trimEnd());
+    if (options.all && result.hidden?.length) { out('Hidden, not for conversation:'); for (const m of result.hidden) out(`  ${m.id.padEnd(width)}  ${m.reason}`); }
+    return result.models.length || !result.error ? 0 : 1;
+  }
+  if (command === 'connections') {
+    const action = options._[1] || 'list';
+    const bootstrap = await client.connect();
+    const note = overrideNote(bootstrap);
+    if (action === 'list') {
+      if (options.json) { out(JSON.stringify(bootstrap.providers.map(p => ({ ...p, ready: readiness(bootstrap, p) })), null, 2)); return 0; }
+      if (note) err(note);
+      if (!bootstrap.providers.length) { out('No connections. Add one with overrule connections add --type <type>.'); return 0; }
+      const column = values => Math.max(...values.map(v => v.length));
+      const rows = bootstrap.providers.map(p => [p.name, bootstrap.types[p.type].label, p.model || 'CLI default model', readiness(bootstrap, p)]);
+      const widths = [0, 1, 2].map(i => column(rows.map(r => r[i])));
+      for (const row of rows) out(row.map((cell, i) => i < 3 ? cell.padEnd(widths[i]) : cell).join('  '));
+      return 0;
+    }
+    if (action === 'add' || action === 'edit' || action === 'test') {
+      const named = action === 'edit' ? options._[2] || fail('overrule connections edit needs the connection name.') : action === 'test' ? options._[2] : null;
+      const existing = named ? findConnection(bootstrap, named) || fail(`No connection named "${named}". Available: ${bootstrap.providers.map(p => p.name).join(', ') || 'none'}.`) : null;
+      const preset = options.preset ? bootstrap.presets.find(p => p.id === options.preset) || fail(`No preset called "${options.preset}". Presets: ${bootstrap.presets.map(p => p.id).join(', ')}.`) : null;
+      const type = options.type ? typeOf(bootstrap, options.type) || fail(`Unknown type "${options.type}". Types: ${typeNames(bootstrap)}.`) : preset?.type || existing?.type || fail(`overrule connections ${action} needs --type${action === 'test' ? ' or a connection name' : ''}. Types: ${typeNames(bootstrap)}.`);
+      const apiKey = await keyFrom(options, readStdin);
+      if (apiKey && bootstrap.types[type].cli) fail('CLI connections use the tool’s own sign-in and take no key.');
+      const body = {
+        type, name: options.name ?? existing?.name ?? preset?.label.replace(/ \(.*\)$/, '') ?? bootstrap.types[type].label,
+        model: options.model ?? (existing?.type === type ? existing.model : '') ?? '',
+        baseUrl: options['base-url'] ?? preset?.baseUrl ?? existing?.baseUrl ?? '',
+        role: options.role ?? existing?.role ?? 'Generalist',
+        ...(apiKey ? { apiKey } : {}), ...(options['clear-key'] ? { clearKey: true } : {}),
+      };
+      if (type === 'compatible' && !body.baseUrl) fail('An OpenAI-compatible connection needs --base-url, for example http://localhost:11434/v1, or --preset ollama.');
+      if (action === 'test') {
+        const cli = bootstrap.types[type].cli;
+        if (!options.json) {
+          if (note) err(note);
+          err(`Testing ${existing ? `"${existing.name}" (${bootstrap.types[type].label}, ${body.model || 'CLI default model'})` : `${bootstrap.types[type].label}, ${body.model || 'CLI default model'}`}: one short message${cli ? ', counted against the CLI plan; this can take up to two minutes' : type === 'compatible' ? '' : ', billed by the provider as a few tokens'}.`);
+        }
+        const result = await client.call('/api/providers/test', 'POST', { ...body, ...(existing ? { connectionId: existing.id } : {}) });
+        if (options.json) { out(JSON.stringify(result, null, 2)); return result.ok ? 0 : 1; }
+        for (const check of result.checks) out(`  ${{ ok: '✓', warn: '!', fail: '✗' }[check.state]} ${check.text}`);
+        out(result.ok ? (result.checks.some(c => c.state === 'warn') ? 'The connection works, with a warning.' : 'The connection works.') : 'The connection did not work.');
+        return result.ok ? 0 : 1;
+      }
+      const saved = await client.call(existing ? `/api/providers/${existing.id}` : '/api/providers', existing ? 'PUT' : 'POST', body);
+      if (options.json) { out(JSON.stringify(saved, null, 2)); return 0; }
+      if (note) err(note);
+      out(`${existing ? 'Updated' : 'Added'} "${saved.name}": ${bootstrap.types[saved.type].label}, ${saved.model || 'CLI default model'}, ${readiness(bootstrap, saved)}.`);
+      reportCheck(saved.modelCheck, err);
+      return 0;
+    }
+    if (action === 'remove') {
+      const found = findConnection(bootstrap, options._[2] || fail('overrule connections remove needs the connection name.')) || fail(`No connection named "${options._[2]}". Available: ${bootstrap.providers.map(p => p.name).join(', ') || 'none'}.`);
+      if (!options.yes) {
+        const agreed = await confirm(`Remove the connection "${found.name}" (${bootstrap.types[found.type].label}${found.hasKey ? ', with its saved key' : ''})? [y/N] `);
+        if (agreed === null) fail('Not removed: there is no terminal to confirm on. Pass --yes to remove without asking.');
+        if (!agreed) fail('Not removed.');
+      }
+      const removed = await client.call(`/api/providers/${found.id}`, 'DELETE');
+      if (options.json) out(JSON.stringify({ removed: found.id, councils: removed.councils || [] }, null, 2));
+      else {
+        out(`Removed "${found.name}".`);
+        for (const c of removed.councils || []) err(`It left the council "${c.name}", which has ${c.seatsLeft} seat${c.seatsLeft === 1 ? '' : 's'} left${c.notes.length ? `; ${c.notes.join('; ')}` : ''}.`);
+      }
+      return 0;
+    }
+    fail(`Unknown connections action "${action}". Use add, edit, test, or remove, or none to list them.`);
+  }
+  if (command === 'councils') {
+    const action = options._[1] || 'list';
+    const bootstrap = await client.connect();
+    const nameOf = id => bootstrap.providers.find(p => p.id === id)?.name || id;
+    const named = value => findCouncil(bootstrap, value) || fail(`No council called "${value}". Councils: ${(bootstrap.councils || []).map(c => c.name).join(', ') || 'none'}.`);
+    if (action === 'list') {
+      const list = [...(bootstrap.councils || [])].sort((a, b) => a.name.localeCompare(b.name));
+      if (options.json) { out(JSON.stringify(list, null, 2)); return 0; }
+      if (!list.length) { out('No saved councils. Save one with overrule councils save <name> --members <names>, or from a meeting with --from <id>.'); return 0; }
+      for (const c of list) out(`${c.name}${c.incomplete ? ' (needs seats)' : ''}${c.purpose ? `: ${c.purpose}` : ''}\n  ${describeCouncil(c, nameOf)}`);
+      return 0;
+    }
+    if (action === 'save') {
+      const name = options._[2] || fail('overrule councils save needs a name.');
+      const seatOf = value => { const found = findConnection(bootstrap, value); if (!found) fail(`No connection named "${value}". Available: ${bootstrap.providers.map(p => p.name).join(', ') || 'none'}.`); return found.id; };
+      let seats = null, settings = {}, groups = [];
+      if (options.from) {
+        const found = await onlyMeeting(client, options.from);
+        if (found.demo) fail('The scripted demo has no council to save.');
+        const snapshot = snapshotFromRun(await client.call(`/api/runs/${found.id}`));
+        seats = snapshot.seats.filter(id => bootstrap.providers.some(p => p.id === id));
+        const gone = snapshot.seats.length - seats.length;
+        if (gone) err(`${gone} of that meeting's members ${gone === 1 ? 'is' : 'are'} no longer a saved connection and ${gone === 1 ? 'is' : 'are'} left out.`);
+        settings = snapshot.settings; groups = GROUP_IDS.filter(id => id !== 'drafter' || seats.includes(settings.drafter.drafterId));
+      }
+      if (options.members) seats = [...new Set(options.members.split(',').map(n => n.trim()).filter(Boolean).map(seatOf))];
+      if (!seats) fail('Give the seats with --members, or copy a meeting with --from <id>.');
+      // Options given here are kept, on top of (or instead of) what --from copied.
+      const add = id => { if (!groups.includes(id)) groups.push(id); };
+      if (options.drafter !== undefined || options['neutral-drafter'] !== undefined) {
+        const drafterId = options.drafter !== undefined ? seatOf(options.drafter) : settings.drafter?.drafterId && seats.includes(settings.drafter.drafterId) ? settings.drafter.drafterId : seats[0];
+        settings.drafter = { drafterId, neutralDrafter: options['neutral-drafter'] !== undefined ? Boolean(options['neutral-drafter']) : Boolean(settings.drafter?.neutralDrafter) }; add('drafter');
+      }
+      if (options.cycles !== undefined) { settings.cycles = number(options.cycles, 'cycles'); add('cycles'); }
+      if (options.revisions !== undefined) { settings.revisions = number(options.revisions, 'revisions'); add('revisions'); }
+      if (options.research !== undefined || options['deep-research'] !== undefined) { settings.research = { research: Boolean(options.research) || Boolean(options['deep-research']), deepResearch: Boolean(options['deep-research']) }; add('research'); }
+      if (['call-limit', 'time-limit', 'turn-limit'].some(o => options[o] !== undefined)) {
+        const base = settings.limits || { maxCalls: null, maxDurationSeconds: 3600, maxTokens: 4096, timeoutSeconds: 180 };
+        settings.limits = { ...base, ...(options['call-limit'] !== undefined ? { maxCalls: number(options['call-limit'], 'call-limit') } : {}), ...(options['time-limit'] !== undefined ? { maxDurationSeconds: number(options['time-limit'], 'time-limit') * 60 } : {}), ...(options['turn-limit'] !== undefined ? { timeoutSeconds: number(options['turn-limit'], 'turn-limit') } : {}) };
+        add('limits');
+      }
+      if (options.without) {
+        const without = options.without.split(',').map(g => g.trim().toLowerCase()).filter(Boolean);
+        const unknown = without.filter(g => !GROUP_IDS.includes(g));
+        if (unknown.length) fail(`--without takes ${GROUP_IDS.join(', ')}; not ${unknown.join(', ')}.`);
+        groups = groups.filter(g => !without.includes(g));
+      }
+      const existing = findCouncil(bootstrap, name);
+      const body = { name, purpose: options.purpose ?? (existing && options.replace ? existing.purpose : ''), seats, settings: keep(settings, groups), replace: Boolean(options.replace) };
+      let saved;
+      try { saved = await client.call('/api/councils', 'POST', body); }
+      catch (error) { if (/already exists/.test(error.message)) fail(`${error.message} Pass --replace to replace it, or choose another name.`); throw error; }
+      if (options.json) { out(JSON.stringify(saved, null, 2)); return 0; }
+      out(`${existing && options.replace ? 'Replaced' : 'Saved'} the council "${saved.name}": ${describeCouncil(saved, nameOf)}.`);
+      const left = GROUP_IDS.filter(id => !(id in saved.settings));
+      if (left.length) err(`It does not keep ${left.map(id => COUNCIL_GROUPS.find(g => g.id === id).label.toLowerCase()).join(', ')}; those stay as each meeting sets them.`);
+      return 0;
+    }
+    if (action === 'rename') {
+      const council = named(options._[2] || fail('overrule councils rename needs the council name.'));
+      const to = options._.slice(3).join(' ').trim() || fail(`Give the new name: overrule councils rename "${council.name}" "<new name>".`);
+      const saved = await client.call(`/api/councils/${council.id}`, 'PUT', { name: to, purpose: council.purpose, seats: council.seats, settings: council.settings });
+      out(options.json ? JSON.stringify(saved, null, 2) : `Renamed the council "${council.name}" to "${saved.name}".`);
+      return 0;
+    }
+    if (action === 'remove') {
+      const council = named(options._[2] || fail('overrule councils remove needs the council name.'));
+      if (!options.yes) {
+        const agreed = await confirm(`Remove the council "${council.name}" (${describeCouncil(council, nameOf)})? Its connections stay saved. [y/N] `);
+        if (agreed === null) fail('Not removed: there is no terminal to confirm on. Pass --yes to remove without asking.');
+        if (!agreed) fail('Not removed.');
+      }
+      await client.call(`/api/councils/${council.id}`, 'DELETE');
+      out(options.json ? JSON.stringify({ removed: council.id }, null, 2) : `Removed the council "${council.name}". Its connections stay saved.`);
+      return 0;
+    }
+    fail(`Unknown councils action "${action}". Use save, rename, or remove, or none to list them.`);
+  }
   if (command === 'list') {
     await client.connect();
     // The server searches; tags and project narrow the result here, the way the browser's filters do.
@@ -393,7 +668,8 @@ export async function main(argv, { out = console.log, err = console.error, confi
 
   if (command === 'review' && !options.path) options.path = options._[1] || '.';
   const bootstrap = await client.connect();
-  const members = chooseMembers(bootstrap, options);
+  const council = options.council ? findCouncil(bootstrap, options.council) || fail(`No council called "${options.council}". Councils: ${(bootstrap.councils || []).map(c => c.name).join(', ') || 'none'}.`) : null;
+  const members = chooseMembers(bootstrap, options, council);
   const workspace = workspacePayload(options);
   let prompt = command === 'review' ? options._.slice(1).filter(arg => arg !== options.path).join(' ') : options._.slice(1).join(' ');
   if (options.playbook) {
@@ -409,13 +685,30 @@ export async function main(argv, { out = console.log, err = console.error, confi
   const seating = `Seating ${members.seats.map(p => `${p.name}${bootstrap.types[p.type]?.cli ? '' : ' (billed per token)'}`).join(', ')}${workspace ? ` on ${workspace.path} (${workspace.level})` : ''}`;
   if (!options.quiet) err(seating + (billed.length && !options.members ? `\n${billed.length} of these bill your API accounts per token. Pass --members to choose the council yourself.` : ''));
   const { seats, names, ...meeting } = members;
+  // A council's kept settings come first; an option given on the command line wins over the council, and is recorded as a change.
+  const kept = council?.settings || {};
+  const given = name => options[name] !== undefined;
+  const changed = council ? [
+    ...(options.members ? ['seats'] : []), ...('drafter' in kept && (given('drafter') || given('neutral-drafter')) ? ['drafter'] : []),
+    ...('cycles' in kept && given('cycles') ? ['cycles'] : []), ...('revisions' in kept && given('revisions') ? ['revisions'] : []),
+    ...('research' in kept && (given('research') || given('deep-research')) ? ['research'] : []),
+    ...('limits' in kept && (given('turn-limit') || given('call-limit') || given('time-limit')) ? ['limits'] : []),
+  ] : [];
+  const research = given('research') || given('deep-research') ? Boolean(options.research) || Boolean(options['deep-research']) : Boolean(kept.research?.research);
+  const deepResearch = given('deep-research') || given('research') ? Boolean(options['deep-research']) : Boolean(kept.research?.deepResearch);
+  const neutralDrafter = given('neutral-drafter') ? Boolean(options['neutral-drafter']) : Boolean(!given('drafter') && kept.drafter?.neutralDrafter && kept.drafter.drafterId === meeting.drafterId);
+  const limits = kept.limits || {};
+  if (council && !options.quiet) err(`Council "${council.name}": ${describeCouncil(council, id => bootstrap.providers.find(p => p.id === id)?.name || id)}${changed.length ? ` (changed here: ${changed.join(', ')})` : ''}`);
   const run = await client.call('/api/runs', 'POST', {
-    prompt, ...meeting, ...(options['neutral-drafter'] ? { neutralDrafter: true } : {}), cycles: options.cycles ? number(options.cycles, 'cycles') : 2,
-    revisions: options.revisions === undefined ? 1 : number(options.revisions, 'revisions'),
-    research: Boolean(options.research) || Boolean(options['deep-research']), deepResearch: Boolean(options['deep-research']),
-    ...(options['turn-limit'] ? { timeoutSeconds: number(options['turn-limit'], 'turn-limit') } : {}),
-    ...(options['call-limit'] ? { maxCalls: number(options['call-limit'], 'call-limit') } : {}),
-    ...(options['time-limit'] ? { maxDurationSeconds: number(options['time-limit'], 'time-limit') * 60 } : {}),
+    prompt, ...meeting, ...(neutralDrafter ? { neutralDrafter: true } : {}),
+    cycles: given('cycles') ? number(options.cycles, 'cycles') : kept.cycles ?? 2,
+    revisions: given('revisions') ? number(options.revisions, 'revisions') : kept.revisions ?? 1,
+    research, deepResearch,
+    ...(given('turn-limit') ? { timeoutSeconds: number(options['turn-limit'], 'turn-limit') } : limits.timeoutSeconds ? { timeoutSeconds: limits.timeoutSeconds } : {}),
+    ...(given('call-limit') ? { maxCalls: number(options['call-limit'], 'call-limit') } : limits.maxCalls ? { maxCalls: limits.maxCalls } : {}),
+    ...(given('time-limit') ? { maxDurationSeconds: number(options['time-limit'], 'time-limit') * 60 } : limits.maxDurationSeconds ? { maxDurationSeconds: limits.maxDurationSeconds } : {}),
+    ...(limits.maxTokens ? { maxTokens: limits.maxTokens } : {}),
+    ...(council ? { council: { id: council.id, changed } } : {}),
     ...(attachmentIds.length ? { attachmentIds } : {}), ...(workspace ? { workspace } : {}),
   });
   log(`Meeting ${run.id.slice(0, 8)} started. Watch it at ${client.url}`);

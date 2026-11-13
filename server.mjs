@@ -6,7 +6,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join, resolve, sep } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Store } from './lib/store.mjs';
-import { TYPES, PRESETS, validateProvider, publicProvider, detectClis, cliKey } from './lib/providers.mjs';
+import { TYPES, PRESETS, validateProvider, publicProvider, detectClis, cliKey, apiBase, compatibleBaseUrl, providerOverride, OVERRIDE_ENV, runProcess, cleanKey } from './lib/providers.mjs';
+import { ModelCatalog, checkModel, NEEDS_KEY, CLAUDE_ALIASES, LIST_TIMEOUT_MS } from './lib/models.mjs';
+import { testConnection, TEST_TIMEOUT_SECONDS } from './lib/connection-test.mjs';
+import { Councils, publicCouncil } from './lib/councils.mjs';
+import { GROUP_IDS } from './public/councils.js';
 import { Mesh, validateRun, exportMarkdown, DEMO_PROMPT, latestCandidate } from './lib/mesh.mjs';
 import { git as workspaceGit, validateWorkspacePath, browseHost, binaryDocuments, inspect as inspectWorkspace, codexCanary, measureLevel, agentsecBinary, LEVELS } from './lib/workspace.mjs';
 import { SecurityJobs, listPresets, memberProfiles, validateImage, vendoredAgentsec } from './lib/security.mjs';
@@ -25,12 +29,15 @@ const defaults = [
 ];
 const demoPool = () => [{ ...defaults[0], id: 'demo-builder', name: 'Demo builder' }, { ...defaults[1], id: 'demo-reviewer', name: 'Demo reviewer' }];
 
-export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process.env.MESH_DATA_DIR || join(root, 'data'), providerCall, detect = detectClis, addresses, workspaceRoot = process.env.OVERRULE_WORKSPACE_ROOT || process.env.MESH_WORKSPACE_ROOT || '', canary = codexCanary, checkRunner, measure = (level, cwd) => measureLevel(level, cwd, { dataDir: directory }), securityJobs, documentRunner, statfs = fsStatfs } = {}) {
+export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process.env.MESH_DATA_DIR || join(root, 'data'), providerCall, detect = detectClis, addresses, workspaceRoot = process.env.OVERRULE_WORKSPACE_ROOT || process.env.MESH_WORKSPACE_ROOT || '', canary = codexCanary, checkRunner, measure = (level, cwd) => measureLevel(level, cwd, { dataDir: directory }), securityJobs, documentRunner, statfs = fsStatfs, modelFetch = fetch, modelRun = runProcess, catalogOptions = {}, saveCheckWaitMs = 3000 } = {}) {
   const store = new Store(directory);
   const access = new Access(store, addresses);
   let providers = store.read('providers.json', defaults.map(p => ({ ...p })));
   const attachments = new Attachments(directory, { run: documentRunner });
   const mesh = new Mesh(store, providerCall, { runChecks: checkRunner, attachments });
+  const catalog = new ModelCatalog(store, { fetchImpl: modelFetch, run: modelRun, ...catalogOptions });
+  const councils = new Councils(store);
+  const councilList = () => councils.list.map(c => publicCouncil(c, providers));
   // Settings the owner changes from the gear menu, saved in data/settings.json. The history limit is how many stopped meetings
   // the list keeps, not counting pinned or archived ones: a number, or "max" for as many as the disk safely holds. An older file's
   // null ("keep every meeting") means "max" now, which is what it always had to mean on a disk of finite size.
@@ -88,6 +95,74 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
       if (clis[key].signedIn === false) throw new Error(`${p.name} is not signed in. Run ${key === 'codex' ? 'codex login' : 'claude auth login'} in your terminal, then use Check in Connections.`);
     }
   }
+  // ---- Model suggestions. The browser and the command line ask here; the server holds the keys and makes the request. ----
+  // Which key lists a provider's models: one typed into the form (not saved yet), else the connection's saved key if the type and,
+  // for a compatible server, the endpoint are unchanged (the rule saving follows), else the server's environment key. A saved key
+  // is never sent to an endpoint it was not saved for.
+  function anthropicKey() {
+    if (process.env.ANTHROPIC_API_KEY) return { key: process.env.ANTHROPIC_API_KEY, keySource: 'environment', keyFrom: 'ANTHROPIC_API_KEY' };
+    const saved = providers.find(p => p.type === 'anthropic' && p.secret);
+    return saved ? { key: store.decrypt(saved.secret), keySource: 'saved', keyFrom: saved.name } : null;
+  }
+  function keyFor(type, base, connection, typed) {
+    if (typeof typed === 'string' && typed) return { key: typed, keySource: 'typed' };
+    if (connection?.secret && connection.type === type && (type !== 'compatible' || connection.baseUrl === base)) return { key: store.decrypt(connection.secret), keySource: 'saved' };
+    if (TYPES[type].env && process.env[TYPES[type].env]?.trim()) return { key: process.env[TYPES[type].env].trim(), keySource: 'environment' };
+    return { key: '', keySource: 'none' };
+  }
+  const nothing = { models: [], hidden: [], fetchedAt: null, cached: false, stale: false, error: null };
+  async function modelsFor(input, { maxWaitMs = null } = {}) {
+    const type = String(input.type || ''), refresh = input.refresh === true;
+    if (!Object.hasOwn(TYPES, type)) throw new Error('Choose a supported connection type.');
+    let connection = null;
+    if (input.connectionId) {
+      connection = providers.find(p => p.id === input.connectionId);
+      if (!connection) throw new Error('Connection not found.');
+    }
+    const typed = cleanKey(input.apiKey);
+    if (input.clearKey === true) connection = null;
+    if (type === 'codex-cli') return { type, source: 'cli', keySource: null, ...(await catalog.get({ type, refresh, maxWaitMs })) };
+    // Claude Code: its aliases always, which follow the newest model of each family, and Anthropic's full list when a key is at hand.
+    if (type === 'claude-cli') {
+      const aliases = CLAUDE_ALIASES.map(a => ({ ...a }));
+      const found = anthropicKey();
+      if (!found) return { type, source: 'aliases', keySource: 'none', ...nothing, models: aliases, aliasesOnly: true, note: 'Only Claude Code’s aliases are listed. Add an Anthropic API connection or set ANTHROPIC_API_KEY on the server to list full model IDs as well.' };
+      const listed = await catalog.get({ type: 'anthropic', base: apiBase({ type: 'anthropic' }), key: found.key, refresh, maxWaitMs });
+      return { type, source: 'aliases+provider', keySource: found.keySource, keyFrom: found.keyFrom, ...listed, models: [...aliases, ...listed.models], aliasesOnly: !listed.models.length };
+    }
+    const base = type === 'compatible' ? compatibleBaseUrl(input.baseUrl || connection?.baseUrl) : apiBase({ type });
+    const { key, keySource } = keyFor(type, base, connection, typed);
+    if (!key && NEEDS_KEY.has(type)) return { type, source: 'provider', keySource, ...nothing, needsKey: true, errorKind: 'no-key', env: TYPES[type].env || null, error: `${TYPES[type].label} lists its models only for a key. Give one${TYPES[type].env ? `, or set ${TYPES[type].env} on the server` : ''}.` };
+    return { type, source: 'provider', keySource, ...(await catalog.get({ type, base, key, refresh, maxWaitMs })) };
+  }
+  // A saved model that the provider does not list is a warning, never a refusal: new releases, suffixes and local tags all exist.
+  async function modelCheckFor(provider) {
+    if (!provider.model) return null;
+    const label = provider.type === 'claude-cli' ? 'Anthropic' : provider.type === 'compatible' ? `the server at ${new URL(provider.baseUrl).host}` : TYPES[provider.type].label;
+    try {
+      // Saving does not wait on a slow provider: after a few seconds the check gives up, and the list request carries on in the background.
+      const result = await modelsFor({ type: provider.type, connectionId: provider.id }, { maxWaitMs: saveCheckWaitMs });
+      return checkModel(provider.type, provider.model, result, { label, aliasesOnly: Boolean(result.aliasesOnly) });
+    } catch (error) { return { status: 'unchecked', detail: `${provider.model} was not checked: ${error.message}` }; }
+  }
+  // Test what the form holds, saved or not: the same validation as saving, the same key rules as listing models, one short message
+  // through the meeting path. The key rides along encrypted in memory and is never written. Closing the request cancels the call.
+  async function testFor(input, signal) {
+    let connection = null;
+    if (input.connectionId) { connection = providers.find(p => p.id === input.connectionId); if (!connection) throw new Error('Connection not found.'); }
+    if (input.clearKey === true) connection = null;
+    // A form that could not be saved cannot be tested either; that is the test's answer, not a failed request.
+    let fields;
+    try { fields = validateProvider({ ...input, name: String(input.name || '').trim() || 'Connection test' }); }
+    catch (error) { return { ok: false, checks: [{ state: 'fail', text: error.message }], type: input.type || null, model: '', target: null, keySource: null, ms: 0 }; }
+    const typed = !TYPES[fields.type].cli ? cleanKey(input.apiKey) : '';
+    const { key, keySource } = TYPES[fields.type].cli ? { key: '', keySource: null } : keyFor(fields.type, apiBase(fields), connection, typed);
+    // The environment key is used by the call itself, as in a meeting; a typed or saved key is handed over encrypted.
+    const provider = { ...fields, id: connection?.id || 'connection-test', secret: key && keySource !== 'environment' ? store.encrypt(key) : undefined };
+    const cli = TYPES[fields.type].cli ? (await refreshClis())[cliKey(fields.type)] || { installed: false } : null;
+    return testConnection(provider, { store, keySource, signal, fetchImpl: modelFetch, cli });
+  }
+  const overrideInfo = () => { try { const url = providerOverride(); return url ? { url, env: OVERRIDE_ENV } : null; } catch (error) { return { error: error.message, env: OVERRIDE_ENV }; } };
   // Recent workspaces are shortcuts, not permissions: any directory that passes validateWorkspacePath can be attached. An older
   // data file's allowed directories ("roots") become the first recents; MESH_WORKSPACE_ROOT only sets where Browse starts.
   const workspaceSettings = store.read('workspaces.json', {});
@@ -178,7 +253,7 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
         if (!local) return json(res, 403, { error: 'Rotate the pairing code through localhost on the host machine.' });
         return json(res, 200, { pairingCode: access.rotate(), urls: access.urls(port), rotatedAt: access.rotatedAt });
       }
-      if (req.method === 'GET' && url.pathname === '/api/bootstrap') { await storageNow(); return json(res, 200, { token: csrf, providers: providers.map(publicProvider), types: TYPES, presets: PRESETS, clis: await currentClis(), runs: summaries(mesh.runs, mesh.effectiveLimit()), settings: publicSettings(), local, lanUrls: access.urls(port) }); }
+      if (req.method === 'GET' && url.pathname === '/api/bootstrap') { await storageNow(); return json(res, 200, { token: csrf, providers: providers.map(publicProvider), types: TYPES, presets: PRESETS, clis: await currentClis(), runs: summaries(mesh.runs, mesh.effectiveLimit()), settings: publicSettings(), local, lanUrls: access.urls(port), providerOverride: overrideInfo(), councils: councilList(), limits: { listSeconds: (catalogOptions.timeoutMs ?? LIST_TIMEOUT_MS) / 1000, testSeconds: TEST_TIMEOUT_SECONDS } }); }
       if (req.method === 'POST' && url.pathname === '/api/clis/check') return json(res, 200, await refreshClis());
       if (req.method === 'GET' && url.pathname === '/api/workspace') return json(res, 200, { recent: recentList(), browseStart: workspaceRoot || '', local, levels: LEVELS, maxScore, agentsec: Boolean(security.binary || agentsecBinary()) });
       if (req.method === 'POST' && url.pathname === '/api/workspace/budget') {
@@ -272,24 +347,40 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
         for (const level of Object.keys(canaries)) if (canaries[level].ok) measurements[level] = await measure(level, path);
         return json(res, 200, { ...info, canaries, measurements, maxScore });
       }
+      // ---- Saved councils: named seats and the settings their owner chose to keep. ----
+      if (req.method === 'GET' && url.pathname === '/api/councils') return json(res, 200, councilList());
+      if (req.method === 'POST' && url.pathname === '/api/councils') return json(res, 201, publicCouncil(councils.create(await body(req), providers), providers));
+      const councilMatch = url.pathname.match(/^\/api\/councils\/([a-f0-9-]{36})$/);
+      if (councilMatch && req.method === 'PUT') return json(res, 200, publicCouncil(councils.update(councilMatch[1], await body(req), providers), providers));
+      if (councilMatch && req.method === 'DELETE') { councils.remove(councilMatch[1]); return json(res, 200, { ok: true }); }
+      if (req.method === 'POST' && url.pathname === '/api/models') return json(res, 200, await modelsFor(await body(req)));
+      if (req.method === 'POST' && url.pathname === '/api/providers/test') {
+        const input = await body(req);
+        const cancel = new AbortController();
+        res.on('close', () => { if (!res.writableFinished) cancel.abort(); });
+        return json(res, 200, await testFor(input, cancel.signal));
+      }
       if (req.method === 'POST' && url.pathname === '/api/providers') {
         if (providers.length >= 20) throw new Error('You can save up to 20 connections.');
         const input = await body(req);
         const provider = { ...validateProvider(input), id: randomUUID() };
-        if (input.apiKey && !TYPES[provider.type].cli) provider.secret = store.encrypt(input.apiKey);
+        const key = cleanKey(input.apiKey);
+        if (key && !TYPES[provider.type].cli) provider.secret = store.encrypt(key);
         providers.push(provider); store.write('providers.json', providers);
-        return json(res, 201, publicProvider(provider));
+        return json(res, 201, { ...publicProvider(provider), modelCheck: await modelCheckFor(provider) });
       }
       const providerMatch = url.pathname.match(/^\/api\/providers\/([a-zA-Z0-9-]+)$/);
       if (providerMatch && ['PUT', 'DELETE'].includes(req.method)) {
         const old = providers.find(p => p.id === providerMatch[1]);
         if (!old) return json(res, 404, { error: 'Connection not found.' });
-        if (req.method === 'DELETE') { providers = providers.filter(p => p !== old); store.write('providers.json', providers); return json(res, 200, { ok: true }); }
+        // A deleted connection leaves every council that seated it; the answer says which, so the owner is told.
+        if (req.method === 'DELETE') { providers = providers.filter(p => p !== old); store.write('providers.json', providers); return json(res, 200, { ok: true, councils: councils.withoutConnection(old.id) }); }
         const input = await body(req);
         const provider = { ...validateProvider(input, old), id: old.id };
-        if (!TYPES[provider.type].cli) provider.secret = input.apiKey ? store.encrypt(input.apiKey) : (input.clearKey || old.type !== provider.type ? undefined : old.secret);
+        const key = cleanKey(input.apiKey);
+        if (!TYPES[provider.type].cli) provider.secret = key ? store.encrypt(key) : (input.clearKey || old.type !== provider.type ? undefined : old.secret);
         providers = providers.map(p => p.id === old.id ? provider : p); store.write('providers.json', providers);
-        return json(res, 200, publicProvider(provider));
+        return json(res, 200, { ...publicProvider(provider), modelCheck: provider.model !== old.model || provider.type !== old.type || provider.baseUrl !== old.baseUrl || key ? await modelCheckFor(provider) : null });
       }
       // ?q= searches every meeting, archived ones included, and says where each match was found. Without it, every meeting is listed.
       if (req.method === 'GET' && url.pathname === '/api/runs') { await storageNow(); return json(res, 200, summaries(mesh.runs, mesh.effectiveLimit(), searchRuns(mesh.runs, url.searchParams.get('q')))); }
@@ -312,6 +403,10 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
         // The scripted demo never reads the prompt, so a half-written draft must not become its recorded prompt.
         if (demo) Object.assign(input, { prompt: DEMO_PROMPT, participantIds: pool.map(p => p.id), drafterId: pool[0].id, cycles: 2 });
         const options = validateRun(input, pool);
+        // Which saved council the meeting started from, and what the owner changed from it, for the record. The name comes from the
+        // saved council, not from the request, so the record never names a council that does not exist.
+        const council = !demo && input.council?.id ? councils.find(String(input.council.id)) : null;
+        options.council = council ? { id: council.id, name: council.name, changed: Array.isArray(input.council.changed) ? input.council.changed.filter(x => ['seats', ...GROUP_IDS].includes(x)) : [] } : null;
         options.workspace = demo ? null : await parseWorkspace(input.workspace, options, local ? 'localhost' : String(req.socket.remoteAddress || 'lan'));
         assertCoversImplementer(options.maxDurationSeconds, options.workspace);
         if (!demo) await assertReady(options.participants);
@@ -404,7 +499,7 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
         }
         if (req.method === 'GET' && !match[2]) return json(res, 200, run);
       }
-      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/meeting-state.js': ['meeting-state.js', 'text/javascript'], '/playbooks.js': ['playbooks.js', 'text/javascript'], '/theme.js': ['theme.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
+      const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/meeting-state.js': ['meeting-state.js', 'text/javascript'], '/playbooks.js': ['playbooks.js', 'text/javascript'], '/model-match.js': ['model-match.js', 'text/javascript'], '/councils.js': ['councils.js', 'text/javascript'], '/theme.js': ['theme.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'], '/favicon.svg': ['favicon.svg', 'image/svg+xml'] };
       if (req.method === 'GET' && Object.hasOwn(files, url.pathname)) {
         const [file, mime] = files[url.pathname];
         const contents = await readFile(join(root, 'public', file));
@@ -413,7 +508,8 @@ export function createApp({ directory = process.env.OVERRULE_DATA_DIR || process
       return json(res, 404, { error: 'Not found.' });
     } catch (error) {
       if (res.headersSent) return res.end();
-      json(res, 400, { error: error instanceof SyntaxError ? 'Invalid JSON request.' : error.message });
+      // An error may name its own status (409 for a name in use, 404 for something gone) and a code the page can act on.
+      json(res, error.httpStatus || 400, { error: error instanceof SyntaxError ? 'Invalid JSON request.' : error.message, ...(error.code && error.httpStatus ? { code: error.code } : {}) });
     }
   });
   server.requestTimeout = 30_000;
@@ -448,6 +544,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const { server, mesh, access } = createApp();
   server.listen(port, process.env.OVERRULE_HOST || process.env.MESH_HOST || '0.0.0.0', () => {
     console.log(`Overrule is running at http://localhost:${server.address().port}`);
+    try { const override = providerOverride(); if (override) console.warn(`${OVERRIDE_ENV} is set: every built-in API connection goes to ${override}, not to its provider.`); }
+    catch (error) { console.error(`${error.message} API connections will fail until it is fixed or unset.`); }
     for (const url of access.urls(server.address().port)) console.log(`LAN: ${url} (pairing required; view the code in the local app’s LAN access menu)`);
   });
   server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `Port ${port} is in use. Start with PORT=4311 npm start.` : error.message); process.exitCode = 1; });

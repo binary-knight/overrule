@@ -49,6 +49,13 @@ textarea{resize:vertical;line-height:1.55}
 .check-label input{width:auto;margin:3px 0 0}
 .field-hint{font-size:13px;color:var(--muted);line-height:1.5}
 .form-error{color:var(--danger-text);font-size:14px}
+.model-status{display:flex;gap:12px;align-items:baseline;justify-content:space-between;margin-top:2px}.model-status .field-hint{margin:0}.model-status .text-button{white-space:nowrap;font-size:13px}
+#model-warning{margin:4px 0 0}
+#provider-override{min-width:0;overflow-wrap:anywhere;font-size:14px}.connection-top p.warn{color:var(--warn-text)}
+.test-result{margin-top:14px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.test-result p{margin:0}.test-result .test-summary{font-weight:600;font-size:14px}.test-result ul{list-style:none;margin:6px 0 0;padding:0}
+.test-result li{display:flex;gap:8px;margin-top:3px}.test-result li span{flex:none;width:1em}
+.test-result .ok{color:var(--ok-text)}.test-result .warn{color:var(--warn-text)}.test-result .fail{color:var(--bad-text)}.test-result .test-note{color:var(--muted);margin-top:6px}
 .count{font-size:12px;min-width:20px;padding:1px 6px;background:var(--tint);border-radius:10px;text-align:center;color:var(--muted)}
 .notice{background:var(--warn-bg);color:var(--warn-text);border:1px solid var(--warn-line);border-radius:6px;padding:10px 12px;font-size:14px;margin-bottom:16px}
 .empty-copy{font-size:14px;color:var(--muted)}
@@ -359,6 +366,7 @@ dialog label{margin:12px 0 0}
 #provider-role{min-height:72px}
 .dialog-actions{display:flex;align-items:center;justify-content:flex-end;gap:16px;margin-top:20px}
 .dialog-actions .text-button{margin-right:auto}
+#provider-form .dialog-actions{flex-wrap:wrap;row-gap:10px}#provider-form .dialog-actions .text-button{white-space:nowrap}
 .button.danger-solid{background:var(--danger-text);border-color:var(--danger-text);color:var(--surface)}
 .button.danger-solid:hover{filter:brightness(.92)}
 .delete-prompt{font-size:14px;color:var(--text-2);background:var(--tint);border-radius:6px;padding:10px 12px;line-height:1.5;max-height:6.5em;overflow:hidden;overflow-wrap:anywhere}
@@ -477,3 +485,12 @@ dialog label{margin:12px 0 0}
 #limit-form .button{margin-top:12px}.usage{overflow-wrap:anywhere}.history-dot.limited{background:var(--warn-text)}
 @media(max-width:1100px){.answer-layout{grid-template-columns:minmax(0,1fr)}}
 .answer-layout.without-evidence { grid-template-columns: minmax(0, 1fr); }
+
+/* Saved councils */
+.council-bar{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:12px 24px 0}.council-bar label{flex:1;min-width:200px}
+.council-bar .button,.council-bar .text-button{white-space:nowrap}.council-bar .text-button{align-self:center;margin-top:20px}
+.council-note{margin:6px 24px 0;overflow-wrap:anywhere}.council-note.warn{color:var(--warn-text)}.council-note .council-purpose{display:block;color:var(--text-2);font-weight:500}
+.seats-hint{margin:6px 24px 0}
+.council-keep{border:1px solid var(--line);border-radius:8px;padding:8px 12px 10px;margin:12px 0 0;min-width:0}.council-keep legend{font-size:14px;color:var(--text-2);padding:0 4px}
+.council-keep .check-label{margin-top:6px;overflow-wrap:anywhere}.council-keep .check-label small{color:var(--muted)}
+#council-dialog{max-width:560px}
